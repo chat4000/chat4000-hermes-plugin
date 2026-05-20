@@ -170,11 +170,21 @@ class RelayMessageTransport(MessageTransport):
         # Tool-call frames — Hermes-specific. notify_if_offline=False because
         # tools don't justify a silent-push wake on their own.
         if isinstance(msg, OutboundToolStart):
-            return self._ship_inner(
-                "tool_start",
-                {"tool_id": msg.tool_id, "name": msg.name, "args": msg.args},
-                notify_if_offline=False,
+            body: dict = {
+                "tool_id": msg.tool_id,
+                "name": msg.name,
+                "args": msg.args,
+            }
+            # `icon` is additive (added 2026-05-20). Only include when set
+            # so the wire frame stays minimal for tools without a registered
+            # emoji — older receivers ignore unknown fields anyway.
+            if msg.icon:
+                body["icon"] = msg.icon
+            logger.info(
+                "transport.send tool_start tool_id=%s name=%s icon=%r args_len=%d",
+                msg.tool_id, msg.name, msg.icon, len(msg.args),
             )
+            return self._ship_inner("tool_start", body, notify_if_offline=False)
         if isinstance(msg, OutboundToolDelta):
             return self._ship_inner(
                 "tool_delta",
