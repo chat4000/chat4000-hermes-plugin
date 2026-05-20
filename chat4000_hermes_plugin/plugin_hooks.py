@@ -222,8 +222,6 @@ def on_pre_tool_call(
 
     _schedule_async(adapter, _emit())
 
-    _schedule_async(adapter, _emit())
-
 
 def on_post_tool_call(
     *,
