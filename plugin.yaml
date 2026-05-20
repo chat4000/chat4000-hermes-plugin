@@ -1,0 +1,40 @@
+name: chat4000
+label: chat4000
+kind: platform
+version: 1.0.0
+description: >
+  Connect a chat4000 iOS/macOS app (or CLI) to your Hermes Agent via the
+  zero-knowledge chat4000 relay. End-to-end encrypted (XChaCha20-Poly1305
+  with a 32-byte group key). The relay never sees plaintext. Same wire
+  protocol and pairing model as the original OpenClaw plugin.
+author: NeonNode Ltd
+license: GPL-3.0-or-later
+homepage: https://chat4000.com
+
+requires_env: []
+
+optional_env:
+  - name: CHAT4000_GROUP_KEY
+    description: >-
+      Raw 32-byte group key (base64 or hex). Override for the plugin-managed
+      key file. Primary workflow is plugin-managed; this is for migration /
+      automation.
+    prompt: "Group key (base64/hex)"
+    password: true
+  - name: CHAT4000_TELEMETRY_DISABLED
+    description: "Set to 1 to disable anonymous error reporting."
+    prompt: "Disable telemetry? (1/true/yes)"
+    password: false
+  - name: CHAT4000_ALLOWED_USERS
+    description: "Comma-separated group_ids allowed (unused; group key is auth)."
+    password: false
+
+provides_platforms:
+  - chat4000
+
+cli:
+  - chat4000
+
+# Plugin requires a recent Hermes core that exposes register_platform + tool
+# lifecycle hooks. Bump if Hermes restructures BasePlatformAdapter.
+requires_hermes: ">=0.10.0"
