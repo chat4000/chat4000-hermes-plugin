@@ -15,10 +15,8 @@ from pathlib import Path
 
 import pytest
 
-# Put the project root on sys.path so `import src.<module>` works without
-# editable-installing the package. The project's pyproject names the
-# top-level package `src` (a deliberate Python convention for plugins
-# that ship a single src/ tree).
+# Put the project root on sys.path so `import chat4000_hermes_plugin.<module>`
+# works without an editable install. The package lives at the repo root.
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -37,11 +35,11 @@ def isolated_home(tmp_path, monkeypatch):
     # Telemetry config also lives under $HOME.
     monkeypatch.setenv("CHAT4000_TELEMETRY_DISABLED", "1")
     # Clear the ack-store cache between tests so each test gets fresh DBs.
-    from src.ack_store import _reset_ack_store_cache_for_tests
+    from chat4000_hermes_plugin.ack_store import _reset_ack_store_cache_for_tests
 
     _reset_ack_store_cache_for_tests()
     # Clear cached device identity so each test gets a fresh UUID.
-    import src.key_store as ks
+    import chat4000_hermes_plugin.key_store as ks
 
     ks._cached_instance = None
     yield

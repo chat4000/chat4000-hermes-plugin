@@ -7,15 +7,15 @@ import os
 
 import pytest
 
-from src.accounts import (
+from chat4000_hermes_plugin.accounts import (
     DEFAULT_RELAY_URL,
     get_default_chat4000_account_id,
     has_configured_state,
     list_chat4000_account_ids,
     resolve_chat4000_account,
 )
-from src.crypto import derive_group_id, generate_group_key, parse_group_key
-from src.key_store import save_stored_group_key
+from chat4000_hermes_plugin.crypto import derive_group_id, generate_group_key, parse_group_key
+from chat4000_hermes_plugin.key_store import save_stored_group_key
 
 
 class TestUnconfigured:

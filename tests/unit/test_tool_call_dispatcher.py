@@ -15,12 +15,12 @@ import json
 
 import pytest
 
-from src.dispatch.tool_call_dispatcher import (
+from chat4000_hermes_plugin.dispatch.tool_call_dispatcher import (
     ARGS_TRUNCATE_BYTES,
     RESULT_TRUNCATE_BYTES,
     ToolCallDispatcher,
 )
-from src.protocol_types import OutboundToolDelta, OutboundToolEnd, OutboundToolStart
+from chat4000_hermes_plugin.protocol_types import OutboundToolDelta, OutboundToolEnd, OutboundToolStart
 
 
 @pytest.fixture

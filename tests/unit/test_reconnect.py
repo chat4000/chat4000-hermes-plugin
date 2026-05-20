@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 
-from src.reconnect import run_with_reconnect
+from chat4000_hermes_plugin.reconnect import run_with_reconnect
 
 
 def _schedule_abort(signal: asyncio.Event, delay: float) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.protocol_types import (
+from chat4000_hermes_plugin.protocol_types import (
     InnerMessage,
     InnerMessageFrom,
     OutboundAck,
@@ -15,8 +15,8 @@ from src.protocol_types import (
     OutboundToolStart,
     StatusUpdate,
 )
-from src.transport import GroupConfig
-from src.transport.mock import MockMessageTransport
+from chat4000_hermes_plugin.transport import GroupConfig
+from chat4000_hermes_plugin.transport.mock import MockMessageTransport
 
 
 @pytest.fixture
@@ -32,7 +32,7 @@ class TestSendBasics:
         assert t.sent[0].wire_id == wid
 
     def test_status_send_recorded(self, t):
-        from src.protocol_types import OutboundStatus
+        from chat4000_hermes_plugin.protocol_types import OutboundStatus
         t.send(OutboundStatus(status="typing"))
         assert len(t.sent) == 1
 

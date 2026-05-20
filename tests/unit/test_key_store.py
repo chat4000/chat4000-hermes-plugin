@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from src.crypto import generate_group_key
-from src.key_store import (
+from chat4000_hermes_plugin.crypto import generate_group_key
+from chat4000_hermes_plugin.key_store import (
     inspect_chat4000_state_access,
     load_stored_group_key,
     resolve_chat4000_instance_identity,
@@ -123,7 +123,7 @@ class TestInstanceIdentity:
     def test_persists_across_cache_reset(self, monkeypatch):
         a = resolve_chat4000_instance_identity()
         # Simulate a fresh process by busting the cache.
-        import src.key_store as ks
+        import chat4000_hermes_plugin.key_store as ks
 
         ks._cached_instance = None
         b = resolve_chat4000_instance_identity()

@@ -33,8 +33,13 @@ dev = [
     "pytest-timeout>=2.4.0",
 ]
 
+[project.entry-points."hermes_agent.plugins"]
+# Pip-install discovery path. The value is the MODULE name (not
+# `module:register`) — Hermes does `getattr(ep.load(), "register", None)`.
+chat4000 = "chat4000_hermes_plugin"
+
 [tool.setuptools.packages.find]
-include = ["src*"]
+include = ["chat4000_hermes_plugin*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

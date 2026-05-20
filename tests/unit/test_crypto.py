@@ -12,7 +12,7 @@ import hashlib
 
 import pytest
 
-from src.crypto import (
+from chat4000_hermes_plugin.crypto import (
     GROUP_KEY_LEN,
     NONCE_LEN,
     PAIRING_CODE_ALPHABET,

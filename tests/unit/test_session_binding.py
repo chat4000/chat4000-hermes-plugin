@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from src.key_store import resolve_hermes_state_dir
-from src.session_binding import (
+from chat4000_hermes_plugin.key_store import resolve_hermes_state_dir
+from chat4000_hermes_plugin.session_binding import (
     HermesSessionCandidate,
     clear_chat4000_session_binding,
     get_chat4000_session_binding,

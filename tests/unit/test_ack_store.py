@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from src.ack_store import (
+from chat4000_hermes_plugin.ack_store import (
     Chat4000AckStore,
     _reset_ack_store_cache_for_tests,
     cleanup_stale_ack_store_lock,

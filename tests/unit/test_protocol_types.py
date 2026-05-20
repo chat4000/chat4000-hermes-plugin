@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from src.protocol_types import (
+from chat4000_hermes_plugin.protocol_types import (
     InnerMessage,
     InnerMessageFrom,
     OutboundToolDelta,

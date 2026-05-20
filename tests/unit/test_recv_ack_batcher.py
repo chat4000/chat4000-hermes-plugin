@@ -11,8 +11,8 @@ import asyncio
 
 import pytest
 
-from src.ack_store import Chat4000AckStore
-from src.recv_ack_batcher import RecvAckBatcher, RecvAckBatcherOptions
+from chat4000_hermes_plugin.ack_store import Chat4000AckStore
+from chat4000_hermes_plugin.recv_ack_batcher import RecvAckBatcher, RecvAckBatcherOptions
 
 
 @pytest.fixture

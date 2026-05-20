@@ -12,8 +12,8 @@ import asyncio
 
 import pytest
 
-from src.dispatch.stream_dispatcher import StreamDispatcher
-from src.protocol_types import OutboundTextDelta, OutboundTextEnd
+from chat4000_hermes_plugin.dispatch.stream_dispatcher import StreamDispatcher
+from chat4000_hermes_plugin.protocol_types import OutboundTextDelta, OutboundTextEnd
 
 
 @pytest.fixture

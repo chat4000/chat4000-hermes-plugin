@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.log_rotate import LOG_MAX_BYTES, rotate_log_if_oversized
+from chat4000_hermes_plugin.log_rotate import LOG_MAX_BYTES, rotate_log_if_oversized
 
 
 class TestRotate:
