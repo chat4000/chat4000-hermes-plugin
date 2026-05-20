@@ -45,6 +45,14 @@ _ACTIVE_ADAPTERS: "weakref.WeakSet" = weakref.WeakSet()
 # the active set churned between pre and post.
 _TOOL_TO_ADAPTER: dict[str, tuple[Any, str]] = {}
 
+# session_id → platform name. Populated by the `on_session_start` hook.
+# Hermes passes the AGENT's session_id (timestamp+hash) to tool hooks —
+# NOT the session-key format `agent:main:{platform}:...` — so parsing the
+# id to derive platform doesn't work. on_session_start is the only hook
+# that ships the platform kwarg alongside the session_id. We record the
+# mapping there and consult it in the tool hooks.
+_SESSION_PLATFORM: dict[str, str] = {}
+
 
 def register_active_adapter(adapter) -> None:
     _ACTIVE_ADAPTERS.add(adapter)
@@ -55,16 +63,16 @@ def deregister_active_adapter(adapter) -> None:
 
 
 def _adapter_for_session(session_id: str):
-    """Return the active chat4000 adapter for a Hermes session_key.
+    """Return the active chat4000 adapter for a Hermes agent session_id.
 
-    Session keys follow `agent:main:{platform}:{chat_type}:{chat_id}[:…]`.
-    The hook fires for every tool in every session — we early-return for
-    non-chat4000 sessions so we don't pay a frame emission cost on
-    telegram / discord / etc."""
+    Routing is via the `_SESSION_PLATFORM` map populated by the
+    `on_session_start` hook — the agent's session_id alone (a timestamp
+    hash) doesn't encode the platform, so we have to remember the
+    mapping. Sessions started BEFORE this plugin loaded are unroutable;
+    restarting the gateway makes them route correctly on next turn."""
     if not session_id:
         return None
-    parts = session_id.split(":")
-    if len(parts) < 3 or parts[2] != "chat4000":
+    if _SESSION_PLATFORM.get(session_id) != "chat4000":
         return None
     # Today there's exactly one chat4000 adapter per gateway (single
     # group_key = single home channel). If/when multi-account lands the
@@ -74,6 +82,34 @@ def _adapter_for_session(session_id: str):
         if getattr(adapter, "_connected", False):
             return adapter
     return None
+
+
+def on_session_start(
+    *,
+    session_id: str = "",
+    platform: str = "",
+    **_: Any,
+) -> None:
+    """Record the platform for this agent session_id so subsequent
+    `pre_tool_call` / `post_tool_call` hooks can route correctly.
+
+    Only chat4000 sessions are kept; other platforms are dropped to
+    avoid unbounded growth (sessions in long-lived gateways)."""
+    if not session_id:
+        return
+    plat = (platform or "").strip().lower()
+    if plat == "chat4000":
+        _SESSION_PLATFORM[session_id] = "chat4000"
+
+
+def on_session_end(
+    *,
+    session_id: str = "",
+    **_: Any,
+) -> None:
+    """Free the routing entry when a session ends."""
+    if session_id:
+        _SESSION_PLATFORM.pop(session_id, None)
 
 
 def _schedule_async(adapter, coro) -> None:
@@ -172,6 +208,8 @@ def register_plugin_hooks(ctx) -> None:
     logged but non-fatal — the platform itself still works, you just
     won't get tool bubbles."""
     try:
+        ctx.register_hook("on_session_start", on_session_start)
+        ctx.register_hook("on_session_end", on_session_end)
         ctx.register_hook("pre_tool_call", on_pre_tool_call)
         ctx.register_hook("post_tool_call", on_post_tool_call)
         logger.info("chat4000: tool-call hooks registered")
