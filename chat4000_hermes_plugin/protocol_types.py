@@ -265,10 +265,15 @@ class OutboundAck:
 class OutboundToolStart:
     """Emitted when Hermes begins executing a tool. Args may be truncated
     to keep the wire frame small — Swift app can request full args via a
-    follow-up RPC (deferred to v2)."""
+    follow-up RPC (deferred to v2).
+
+    `icon` is the per-tool emoji from Hermes' agent.display.get_tool_emoji
+    registry (skill_view → 📚, todo → 📋, cronjob → ⏰, etc.) — Swift
+    app renders it in the bubble header. Empty string = default hammer."""
     tool_id: str          # stable correlator across start/delta/end
     name: str             # e.g. "bash", "read_file", "web.search"
     args: str             # JSON-encoded args, truncated to ~2KB
+    icon: str = ""        # tool emoji, e.g. "📚" — empty = use default
     kind: Literal["toolStart"] = "toolStart"
 
 
