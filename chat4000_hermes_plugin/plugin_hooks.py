@@ -40,10 +40,16 @@ logger = logging.getLogger(__name__)
 # was never explicitly deregistered (crash, GC race) doesn't leak.
 _ACTIVE_ADAPTERS: "weakref.WeakSet" = weakref.WeakSet()
 
-# tool_call_id → (adapter, our_minted_tool_id). Populated in pre, popped in
-# post. Kept tight so post_tool_call delivers to the same adapter even if
-# the active set churned between pre and post.
-_TOOL_TO_ADAPTER: dict[str, tuple[Any, str]] = {}
+# Pre/post correlation queue, keyed by (task_id, tool_name).
+#
+# Hermes' hook surface is asymmetric: `pre_tool_call` fires BEFORE the
+# tool_call_id is minted by the LLM provider (so the kwarg arrives
+# empty), but `post_tool_call` fires AFTER and DOES carry the id. We
+# can't bridge by tool_call_id. Hermes' own langfuse plugin solves the
+# same problem with a per-(task_id, tool_name) queue — pre appends, post
+# pops in FIFO order. Lists not dicts so concurrent tool_calls of the
+# same name (parallel web.search) don't clobber each other.
+_PENDING_TOOL_CALLS: dict[tuple[str, str], list[tuple[Any, str]]] = {}
 
 # session_id → platform name. Populated by the `on_session_start` hook.
 # Hermes passes the AGENT's session_id (timestamp+hash) to tool hooks —
@@ -182,7 +188,7 @@ def on_pre_tool_call(
         )
         return
 
-    captured_id = tool_call_id
+    queue_key = (task_id or session_id, tool_name)
 
     # Look up the tool's emoji from Hermes' central registry. This is the
     # same source Telegram, IRC and the CLI all use (`agent.display`),
@@ -199,8 +205,9 @@ def on_pre_tool_call(
         our_id = await adapter._tool_dispatcher.on_tool_start(
             name=tool_name, args=args or {}, icon=icon
         )
-        if captured_id:
-            _TOOL_TO_ADAPTER[captured_id] = (adapter, our_id)
+        _PENDING_TOOL_CALLS.setdefault(queue_key, []).append((adapter, our_id))
+
+    _schedule_async(adapter, _emit())
 
     _schedule_async(adapter, _emit())
 
@@ -221,15 +228,24 @@ def on_post_tool_call(
         "chat4000.post_tool_call: tool=%s session=%s task=%s tool_call_id=%s",
         tool_name, session_id, task_id, tool_call_id,
     )
-    cached = _TOOL_TO_ADAPTER.pop(tool_call_id, None) if tool_call_id else None
-    if cached is not None:
-        adapter, our_id = cached
+    queue_key = (task_id or session_id, tool_name)
+    queue = _PENDING_TOOL_CALLS.get(queue_key)
+    if queue:
+        adapter, our_id = queue.pop(0)
+        if not queue:
+            _PENDING_TOOL_CALLS.pop(queue_key, None)
     else:
-        adapter = _adapter_for_session(session_id or task_id)
-        if adapter is None:
-            logger.info("chat4000.post_tool_call: no adapter, skipping")
-            return
-        our_id = tool_name  # fallback — dispatcher resolves by name
+        # pre_tool_call didn't fire (e.g. session predates plugin load) —
+        # nothing to close. Emitting a tool_end with a fabricated id
+        # would create a ghost bubble on the client, so just skip.
+        logger.info(
+            "chat4000.post_tool_call: no pending pre for %s, skipping",
+            queue_key,
+        )
+        return
+
+    if adapter._tool_dispatcher is None:
+        return
 
     if adapter._tool_dispatcher is None:
         return
