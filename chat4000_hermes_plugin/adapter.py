@@ -402,12 +402,11 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
         )
 
         event = MessageEvent(
-            source=source,
-            message_id=inner.id,
-            message_type=message_type,
-            payload=payload,
             text=payload.get("text", ""),
-            raw=inner.to_wire(),
+            message_type=message_type,
+            source=source,
+            raw_message=inner.to_wire(),
+            message_id=inner.id,
         )
 
         # handle_message is BasePlatformAdapter's bridge into the gateway
