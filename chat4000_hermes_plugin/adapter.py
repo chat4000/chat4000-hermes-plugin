@@ -96,6 +96,13 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
         self._tool_dispatcher: Optional[ToolCallDispatcher] = None
         self._connected = False
         self._handlers_unsubscribe: list = []
+        # Captured at connect-time for plugin_hooks to schedule async
+        # frame emissions on the right asyncio loop.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Make this adapter visible to plugin-level tool hooks. Weakref-
+        # backed, so a crashed adapter doesn't leak.
+        from .plugin_hooks import register_active_adapter
+        register_active_adapter(self)
 
     @property
     def name(self) -> str:
@@ -104,6 +111,14 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
     # ─── BasePlatformAdapter — lifecycle ─────────────────────────────────
 
     async def connect(self) -> bool:
+        # Capture the running event loop so plugin_hooks (called from the
+        # synchronous tool-execution path) can schedule async frame
+        # emissions back onto our loop.
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
+
         # Resolve the account from extras (config.yaml) merged with env.
         # We pass a synthetic `cfg` shape that resolve_chat4000_account
         # understands so we can reuse the TS-port logic 1:1.
@@ -143,6 +158,8 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
 
     async def disconnect(self) -> None:
         self._connected = False
+        from .plugin_hooks import deregister_active_adapter
+        deregister_active_adapter(self)
         self._abort_signal.set()
         for unsub in self._handlers_unsubscribe:
             try:
@@ -515,9 +532,15 @@ def register(ctx) -> None:
     The registry call also wires CLI subcommands (`hermes chat4000 ...`)
     — those live in src/cli.py and use the same ctx.register_cli surface
     Hermes' built-in plugins use."""
+    from .plugin_hooks import register_plugin_hooks
     from .telemetry import initialize_chat4000_telemetry
 
     initialize_chat4000_telemetry()
+
+    # Wire Hermes' cross-cutting tool-call hooks so the iOS app sees
+    # tool_start / tool_end bubbles for every tool the agent invokes
+    # in chat4000 sessions. The hooks self-filter by session_id.
+    register_plugin_hooks(ctx)
 
     # chat4000's auth IS the 32-byte group key: anyone with it can already
     # decrypt every message. Hermes' per-user pairing on top would just
