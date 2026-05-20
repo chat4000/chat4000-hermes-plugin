@@ -29,9 +29,47 @@ from typing import Any, Optional
 from .accounts import resolve_chat4000_account
 from .ack_store import cleanup_stale_ack_store_lock, resolve_ack_store_path
 from .crypto import (
+    PAIRING_CODE_ALPHABET,
     generate_pairing_code,
     normalize_pairing_code,
 )
+
+
+def _validate_user_supplied_code(raw: str) -> str:
+    """Reject pairing codes with banned characters.
+
+    The alphabet excludes 0, 1, 5, I, L, O, S to avoid the visual
+    ambiguities (zero vs O, one vs I vs L, five vs S) that plague
+    handwritten / typed transcription. Generated codes are 8 chars
+    formatted as XXXX-YYYY; user-supplied codes must follow the
+    same shape (4+dash+4) so they're consistent on both ends.
+
+    Raises ClickException on invalid input — surfaces a clean error
+    to the operator instead of silently normalizing and pairing with
+    a different code than what they typed."""
+    import click  # type: ignore[import-not-found]
+
+    stripped = (raw or "").replace(" ", "").replace("-", "").upper()
+    if not stripped:
+        raise click.ClickException("Pairing code is empty.")
+
+    bad = sorted({ch for ch in stripped if ch not in PAIRING_CODE_ALPHABET})
+    if bad:
+        raise click.ClickException(
+            f"Pairing code {raw!r} contains illegal characters: "
+            f"{''.join(bad)}.\n"
+            f"Allowed alphabet (28 chars, no 0/1/5/I/L/O/S to avoid "
+            f"visual ambiguity): {PAIRING_CODE_ALPHABET}"
+        )
+
+    if len(stripped) != 8:
+        raise click.ClickException(
+            f"Pairing code must be 8 characters from the alphabet "
+            f"(formatted XXXX-YYYY). Got {len(stripped)}: {raw!r}"
+        )
+
+    # Re-format as XXXX-YYYY so display + room derivation are consistent.
+    return f"{stripped[:4]}-{stripped[4:]}"
 from .error_log import dump_chat4000_trace
 from .key_store import (
     inspect_chat4000_state_access,
@@ -290,7 +328,8 @@ async def _run_pair_command(
     cfg = _load_hermes_config()
     acct = resolve_chat4000_account(cfg, account_id)
     pll = _normalize_log_level(pairing_log_level or acct.pairing_log_level)
-    code = (code or "").strip() or generate_pairing_code()
+    raw = (code or "").strip()
+    code = _validate_user_supplied_code(raw) if raw else generate_pairing_code()
     group_key_bytes = _ensure_local_key_for_account(acct)
 
     click.echo(f"Pairing code: {code}")
@@ -351,6 +390,7 @@ async def _run_pair_many_command(
     import click  # type: ignore[import-not-found]
     from .pairing import ContinuousHostOptions
 
+    code = _validate_user_supplied_code(code)
     cfg = _load_hermes_config()
     acct = resolve_chat4000_account(cfg, account_id)
     pll = _normalize_log_level(pairing_log_level or acct.pairing_log_level)
