@@ -68,16 +68,13 @@ def _adapter_for_session(session_id: str):
     Routing is via the `_SESSION_PLATFORM` map populated by the
     `on_session_start` hook — the agent's session_id alone (a timestamp
     hash) doesn't encode the platform, so we have to remember the
-    mapping. Sessions started BEFORE this plugin loaded are unroutable;
-    restarting the gateway makes them route correctly on next turn."""
+    mapping. Sessions created BEFORE this plugin loaded are unroutable
+    by design; users must `/new` (or reset the session) once after
+    install, then routing works for the lifetime of every new session."""
     if not session_id:
         return None
     if _SESSION_PLATFORM.get(session_id) != "chat4000":
         return None
-    # Today there's exactly one chat4000 adapter per gateway (single
-    # group_key = single home channel). If/when multi-account lands the
-    # adapter list will need group_id-keyed lookup; until then take the
-    # first live one.
     for adapter in list(_ACTIVE_ADAPTERS):
         if getattr(adapter, "_connected", False):
             return adapter
@@ -100,6 +97,26 @@ def on_session_start(
     plat = (platform or "").strip().lower()
     if plat == "chat4000":
         _SESSION_PLATFORM[session_id] = "chat4000"
+
+
+def on_pre_llm_call(
+    *,
+    session_id: str = "",
+    platform: str = "",
+    **_: Any,
+) -> None:
+    """Fires once per LLM turn (every conversation step). Carries both
+    `session_id` and `platform`. We use it to populate
+    `_SESSION_PLATFORM` lazily — `on_session_start` only fires for
+    BRAND-NEW sessions, so sessions that pre-date the plugin install
+    would otherwise never be classified. pre_llm_call fills the gap on
+    the first turn after install."""
+    if not session_id:
+        return
+    plat = (platform or "").strip().lower()
+    if plat == "chat4000":
+        if _SESSION_PLATFORM.get(session_id) != "chat4000":
+            _SESSION_PLATFORM[session_id] = "chat4000"
 
 
 def on_session_end(
@@ -210,6 +227,7 @@ def register_plugin_hooks(ctx) -> None:
     try:
         ctx.register_hook("on_session_start", on_session_start)
         ctx.register_hook("on_session_end", on_session_end)
+        ctx.register_hook("pre_llm_call", on_pre_llm_call)
         ctx.register_hook("pre_tool_call", on_pre_tool_call)
         ctx.register_hook("post_tool_call", on_post_tool_call)
         logger.info("chat4000: tool-call hooks registered")
