@@ -502,12 +502,20 @@ def validate_config(config) -> bool:
 def _env_enablement() -> Optional[dict]:
     """Auto-enable the platform when CHAT4000_GROUP_KEY is set or a key
     file exists. Hermes calls this BEFORE adapter construction so
-    `hermes gateway status` sees the right state."""
+    `hermes gateway status` sees the right state.
+
+    Side-effect: also seeds `CHAT4000_HOME_CHANNEL` in the process env
+    so Hermes' "📬 No home channel set" first-message prompt doesn't
+    fire. chat4000 has exactly one group per gateway — the group_id
+    IS the home channel, no user choice to make. Pre-existing
+    CHAT4000_HOME_CHANNEL values are respected (operator override)."""
     from .accounts import resolve_chat4000_account
 
     account = resolve_chat4000_account(None, None)
     if not account.configured:
         return None
+    if not os.getenv("CHAT4000_HOME_CHANNEL", "").strip():
+        os.environ["CHAT4000_HOME_CHANNEL"] = account.group_id
     return {
         "accountId": account.account_id,
         "groupId": account.group_id,
