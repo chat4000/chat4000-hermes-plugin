@@ -25,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal, Optional
 
-from ..types import OutboundTextDelta, OutboundTextEnd
+from ..protocol_types import OutboundTextDelta, OutboundTextEnd
 
 DEFAULT_FLUSH_MIN_CHARS = 200
 DEFAULT_FLUSH_DELAY_MS = 100

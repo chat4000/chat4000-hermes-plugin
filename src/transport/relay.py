@@ -41,7 +41,7 @@ from ..package_info import read_package_version
 from ..reconnect import run_with_reconnect
 from ..recv_ack_batcher import RecvAckBatcher, RecvAckBatcherOptions
 from ..runtime_logger import RuntimeLogger
-from ..types import (
+from ..protocol_types import (
     InnerMessage,
     InnerMessageFrom,
     OutboundAck,

@@ -15,7 +15,7 @@ import abc
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal, Optional, Union
 
-from ..types import (
+from ..protocol_types import (
     ConnectionFailed,
     ConnectionState,
     InnerMessage,

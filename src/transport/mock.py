@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-from ..types import (
+from ..protocol_types import (
     InnerMessage,
     OutboundAck,
     OutboundMessage,

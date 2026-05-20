@@ -24,7 +24,7 @@ from .key_store import (
     load_stored_group_key,
     resolve_chat4000_key_file_path,
 )
-from .types import Chat4000AccountConfig, Chat4000Config, ResolvedChat4000Account
+from .protocol_types import Chat4000AccountConfig, Chat4000Config, ResolvedChat4000Account
 
 DEFAULT_RELAY_URL = "wss://relay.chat4000.com/ws"
 

@@ -22,9 +22,26 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=8.0", "pytest-asyncio>=0.23", "pytest-cov>=5.0"]
 
+[dependency-groups]
+# uv reads this for `uv sync`. Hermes installs the package via its own
+# uv-managed venv (`uv pip install` from pyproject.toml's deps), so this
+# dev group is only used by `uv sync` during local development.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "pytest-timeout>=2.4.0",
+]
+
 [tool.setuptools.packages.find]
 include = ["src*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.uv]
+# Plugin is loaded by Hermes' Python process — we don't ship our own
+# Python or build into a venv at install time. `uv sync` only sets up
+# the local dev environment used by tests.
+package = true

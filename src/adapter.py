@@ -44,7 +44,7 @@ from .transport.registry import (
     unregister_transport,
 )
 from .transport.relay import RelayMessageTransport
-from .types import (
+from .protocol_types import (
     ConnectionFailed,
     InnerMessage,
     OutboundAck,

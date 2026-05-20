@@ -28,7 +28,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 )
 from cryptography.hazmat.primitives import serialization
 
-from .types import RelayWrappedKeyPayload
+from .protocol_types import RelayWrappedKeyPayload
 
 # ─── Constants (must match TS impl byte-for-byte) ──────────────────────────
 

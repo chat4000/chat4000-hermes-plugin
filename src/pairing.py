@@ -45,7 +45,7 @@ from .crypto import (
 )
 from .error_log import dump_chat4000_trace
 from .pairing_logger import PairingLogger, PairingLogLevel
-from .types import RelayWrappedKeyPayload
+from .protocol_types import RelayWrappedKeyPayload
 
 logger = logging.getLogger(__name__)
 

@@ -28,7 +28,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
-from ..types import OutboundToolDelta, OutboundToolEnd, OutboundToolStart, ToolStatus
+from ..protocol_types import OutboundToolDelta, OutboundToolEnd, OutboundToolStart, ToolStatus
 
 # Wire-frame size caps. Chosen to fit comfortably inside the relay's
 # 64 KB max envelope after b64 + AEAD inflation (~1.37×).
