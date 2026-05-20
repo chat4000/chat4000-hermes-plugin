@@ -519,6 +519,15 @@ def register(ctx) -> None:
 
     initialize_chat4000_telemetry()
 
+    # chat4000's auth IS the 32-byte group key: anyone with it can already
+    # decrypt every message. Hermes' per-user pairing on top would just
+    # mean "pair the device once with chat4000 E2E, then ALSO ask the bot
+    # owner to approve a code". Skip the second layer by default — users
+    # who want platform-level allowlists can set CHAT4000_ALLOW_ALL_USERS
+    # to "false" and use CHAT4000_ALLOWED_USERS like other platforms.
+    if "CHAT4000_ALLOW_ALL_USERS" not in os.environ:
+        os.environ["CHAT4000_ALLOW_ALL_USERS"] = "true"
+
     AdapterClass = _make_adapter_class()
     # Chat4000Adapter.__init__ does the BasePlatformAdapter super-call
     # itself (with `platform=Platform("chat4000")`) — factory only passes
@@ -531,8 +540,13 @@ def register(ctx) -> None:
         validate_config=validate_config,
         env_enablement_fn=_env_enablement,
         required_env=[],
-        install_hint="Run `hermes chat4000 pair` to pair a device.",
+        install_hint="Run `chat4000 pair` to pair a device.",
         max_message_length=4096,
+        # Wire Hermes' auth allowlist envs to chat4000-specific names so
+        # the gateway's _is_user_authorized branch resolves them via the
+        # plugin registry instead of falling through to GATEWAY_*.
+        allowed_users_env="CHAT4000_ALLOWED_USERS",
+        allow_all_env="CHAT4000_ALLOW_ALL_USERS",
         platform_hint=(
             "You are chatting via chat4000 (encrypted iOS/macOS/CLI client). "
             "It supports markdown formatting and streams replies as text_delta "
