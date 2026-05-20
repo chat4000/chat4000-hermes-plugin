@@ -198,8 +198,11 @@ def on_pre_tool_call(
     try:
         from agent.display import get_tool_emoji  # type: ignore[import-not-found]
         icon = get_tool_emoji(tool_name, default="")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.info("chat4000.pre_tool_call: get_tool_emoji failed: %s", exc)
+    logger.info(
+        "chat4000.pre_tool_call: resolved icon=%r for tool=%s", icon, tool_name,
+    )
 
     async def _emit() -> None:
         our_id = await adapter._tool_dispatcher.on_tool_start(
