@@ -494,11 +494,18 @@ def _make_adapter_class():
     imports cleanly during unit tests / CI."""
     from gateway.platforms.base import BasePlatformAdapter  # type: ignore[import-not-found]
 
-    namespace = dict(Chat4000Adapter.__dict__)
+    # Preserve everything except a few class-machinery dunders Python
+    # populates automatically. In particular, keep `__init__` — without
+    # it the dynamic class inherits BasePlatformAdapter.__init__, which
+    # needs a `platform` positional arg the factory doesn't pass.
+    _SKIP = {"__dict__", "__weakref__", "__module__", "__qualname__"}
+    namespace = {
+        k: v for k, v in Chat4000Adapter.__dict__.items() if k not in _SKIP
+    }
     return type(
         "Chat4000Adapter",
         (BasePlatformAdapter,),
-        {k: v for k, v in namespace.items() if not k.startswith("__")},
+        namespace,
     )
 
 
@@ -514,6 +521,9 @@ def register(ctx) -> None:
     initialize_chat4000_telemetry()
 
     AdapterClass = _make_adapter_class()
+    # Chat4000Adapter.__init__ does the BasePlatformAdapter super-call
+    # itself (with `platform=Platform("chat4000")`) — factory only passes
+    # the PlatformConfig.
     ctx.register_platform(
         name="chat4000",
         label="chat4000",
