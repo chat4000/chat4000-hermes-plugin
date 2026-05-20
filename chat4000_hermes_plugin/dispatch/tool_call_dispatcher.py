@@ -77,11 +77,17 @@ class ToolCallDispatcher:
 
     # ─── Hermes lifecycle hooks (called from adapter.py) ──────────────────
 
-    async def on_tool_start(self, *, name: str, args: dict | str) -> str:
+    async def on_tool_start(
+        self, *, name: str, args: dict | str, icon: str = ""
+    ) -> str:
         """Emit tool_start. Returns the tool_id the caller threads through
         on_tool_output / on_tool_end. Hermes' agent doesn't natively expose
         a per-invocation id — we mint our own UUID so concurrent tool
-        invocations don't collide on (name) alone."""
+        invocations don't collide on (name) alone.
+
+        `icon` is forwarded as-is; the Swift app renders it in the bubble
+        header. Plumb the result of `agent.display.get_tool_emoji(name)`
+        through here from the plugin hook for per-tool icons."""
         if self._disposed:
             return ""
         tool_id = str(uuid.uuid4())
@@ -94,7 +100,9 @@ class ToolCallDispatcher:
 
         args_str = self._encode_args(args)
         await self._send_or_await(
-            OutboundToolStart(tool_id=tool_id, name=name, args=args_str)
+            OutboundToolStart(
+                tool_id=tool_id, name=name, args=args_str, icon=icon or ""
+            )
         )
         return tool_id
 

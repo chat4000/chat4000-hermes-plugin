@@ -184,9 +184,20 @@ def on_pre_tool_call(
 
     captured_id = tool_call_id
 
+    # Look up the tool's emoji from Hermes' central registry. This is the
+    # same source Telegram, IRC and the CLI all use (`agent.display`),
+    # so the iOS app gets the same per-tool icon vocabulary out of the
+    # box — skill_view → 📚, todo → 📋, cronjob → ⏰, bash → 🛠️, etc.
+    icon = ""
+    try:
+        from agent.display import get_tool_emoji  # type: ignore[import-not-found]
+        icon = get_tool_emoji(tool_name, default="")
+    except Exception:
+        pass
+
     async def _emit() -> None:
         our_id = await adapter._tool_dispatcher.on_tool_start(
-            name=tool_name, args=args or {}
+            name=tool_name, args=args or {}, icon=icon
         )
         if captured_id:
             _TOOL_TO_ADAPTER[captured_id] = (adapter, our_id)
@@ -206,12 +217,17 @@ def on_post_tool_call(
 ) -> None:
     """Hermes calls this synchronously from agent.tool_executor AFTER
     a tool finishes. We emit `tool_end` with status + result."""
+    logger.info(
+        "chat4000.post_tool_call: tool=%s session=%s task=%s tool_call_id=%s",
+        tool_name, session_id, task_id, tool_call_id,
+    )
     cached = _TOOL_TO_ADAPTER.pop(tool_call_id, None) if tool_call_id else None
     if cached is not None:
         adapter, our_id = cached
     else:
         adapter = _adapter_for_session(session_id or task_id)
         if adapter is None:
+            logger.info("chat4000.post_tool_call: no adapter, skipping")
             return
         our_id = tool_name  # fallback — dispatcher resolves by name
 
