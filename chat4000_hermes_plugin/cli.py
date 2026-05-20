@@ -59,12 +59,11 @@ _PAIR_CODE_FONT = {
 }
 
 
-def register_chat4000_cli(ctx) -> None:
-    """Wire the CLI subgroup into Hermes' click app.
-
-    Hermes' ctx.register_cli signature accepts a callable receiving the
-    click Group/Context. We mount a single `chat4000` subgroup with all
-    operator commands."""
+def _build_chat4000_cli():
+    """Build the Click `chat4000` subgroup. Module-level factory so the
+    same group can be registered with Hermes (`ctx.register_cli`) AND
+    served as a standalone console script (`chat4000 ...` after
+    `pip install`)."""
 
     import click  # type: ignore[import-not-found]
 
@@ -225,8 +224,24 @@ def register_chat4000_cli(ctx) -> None:
         click.echo("Telemetry enabled. Anonymous error reports will be sent.")
         click.echo("Privacy policy: https://chat4000.com/privacy")
 
-    # Register the whole subgroup with Hermes' CLI root.
-    ctx.register_cli(chat4000)
+    return chat4000
+
+
+def register_chat4000_cli(ctx) -> None:
+    """Wire the chat4000 subgroup into Hermes' click app via ctx.register_cli.
+    Only used by Hermes versions that expose register_cli on PluginContext."""
+    ctx.register_cli(_build_chat4000_cli())
+
+
+def main() -> None:
+    """Standalone entry point — `chat4000 ...` after `pip install`.
+
+    Used when Hermes doesn't expose ctx.register_cli (current v0.14.0) or
+    when running outside Hermes' process entirely (devops scripts, App
+    Store review pair-many, etc.). Wires up telemetry before dispatch."""
+    initialize_chat4000_telemetry()
+    cli = _build_chat4000_cli()
+    cli(prog_name="chat4000")
 
 
 # ─── Command implementations (async-capable to share pairing logic) ───────

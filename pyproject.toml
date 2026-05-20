@@ -17,6 +17,10 @@ dependencies = [
   "cryptography>=42.0",
   "sentry-sdk>=2.0",
   "qrcode>=7.4",
+  # `click` is used by the standalone `chat4000` console script.
+  # Hermes already ships it transitively, but declare it explicitly so
+  # the script also works when the plugin is installed outside Hermes.
+  "click>=8.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +41,12 @@ dev = [
 # Pip-install discovery path. The value is the MODULE name (not
 # `module:register`) — Hermes does `getattr(ep.load(), "register", None)`.
 chat4000 = "chat4000_hermes_plugin"
+
+[project.scripts]
+# Standalone CLI: `chat4000 pair`, `chat4000 status`, etc. Required on
+# Hermes versions that don't expose ctx.register_cli (v0.14.0 doesn't).
+# Lives in Hermes' venv `bin/` after `pip install`.
+chat4000 = "chat4000_hermes_plugin.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["chat4000_hermes_plugin*"]
