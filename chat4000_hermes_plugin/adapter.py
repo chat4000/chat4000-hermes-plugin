@@ -396,28 +396,68 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
         BasePlatformAdapter.handle_message is the canonical entry point —
         it constructs a MessageEvent, builds the SessionSource, and routes
         through the gateway's session-resolution + agent-dispatch pipeline.
-        That's the exact path the Telegram/Slack/Discord adapters take."""
-        from gateway.platforms.base import MessageEvent, MessageType  # type: ignore[import-not-found]
+        That's the exact path the Telegram/Slack/Discord adapters take.
 
-        # Map inner.body → MessageEvent payload.
+        For image/audio: Hermes' vision + STT tools read the file from
+        `event.media_urls`, NOT from any payload dict. We cache the
+        decoded bytes to `~/.hermes/cache/{images,audio}/` and pass the
+        absolute path through — identical to how Telegram, WhatsApp,
+        Discord etc. surface user attachments."""
+        import base64
+
+        from gateway.platforms.base import (  # type: ignore[import-not-found]
+            MessageEvent,
+            MessageType,
+            cache_audio_from_bytes,
+            cache_image_from_bytes,
+        )
+
+        media_urls: list[str] = []
+        media_types: list[str] = []
+        text = ""
+
+        # Map inner.body → MessageEvent. For media types we decode the
+        # base64 payload and cache it; Hermes' STT / vision tools pick
+        # up the path from media_urls.
         if inner.t == "text":
             text = (inner.body or {}).get("text", "")
             message_type = MessageType.TEXT
-            payload = {"text": text}
         elif inner.t == "image":
             message_type = MessageType.IMAGE
-            payload = {
-                "data_base64": (inner.body or {}).get("data_base64", ""),
-                "mime_type": (inner.body or {}).get("mime_type", "image/jpeg"),
-            }
+            mime = (inner.body or {}).get("mime_type", "image/jpeg")
+            data_b64 = (inner.body or {}).get("data_base64", "")
+            if data_b64:
+                try:
+                    raw = base64.b64decode(data_b64)
+                    ext = "." + (mime.rsplit("/", 1)[-1] or "jpg").lower()
+                    # Common ones: image/jpeg → .jpg; image/png → .png.
+                    if ext == ".jpeg":
+                        ext = ".jpg"
+                    media_urls.append(cache_image_from_bytes(raw, ext=ext))
+                    media_types.append(mime)
+                except Exception as exc:
+                    logger.warning("chat4000: failed to cache inbound image: %s", exc)
         elif inner.t == "audio":
             message_type = MessageType.AUDIO
-            payload = {
-                "data_base64": (inner.body or {}).get("data_base64", ""),
-                "mime_type": (inner.body or {}).get("mime_type", "audio/mp4"),
-                "duration_ms": (inner.body or {}).get("duration_ms", 0),
-                "waveform": (inner.body or {}).get("waveform") or [],
-            }
+            mime = (inner.body or {}).get("mime_type", "audio/m4a")
+            data_b64 = (inner.body or {}).get("data_base64", "")
+            if data_b64:
+                try:
+                    raw = base64.b64decode(data_b64)
+                    # iOS app sends `audio/m4a` for AVAudioRecorder output;
+                    # macOS app + CLI may send `audio/ogg` or `audio/mp3`.
+                    # Use the mime subtype as the extension so Hermes' STT
+                    # picks the right decoder.
+                    subtype = (mime.rsplit("/", 1)[-1] or "m4a").lower()
+                    ext = "." + (subtype.split(";")[0].strip() or "m4a")
+                    media_urls.append(cache_audio_from_bytes(raw, ext=ext))
+                    media_types.append(mime)
+                    logger.info(
+                        "chat4000: cached inbound audio (%s, %d bytes) → %s",
+                        mime, len(raw), media_urls[-1],
+                    )
+                except Exception as exc:
+                    logger.warning("chat4000: failed to cache inbound audio: %s", exc)
         else:
             return
 
@@ -430,11 +470,13 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
         )
 
         event = MessageEvent(
-            text=payload.get("text", ""),
+            text=text,
             message_type=message_type,
             source=source,
             raw_message=inner.to_wire(),
             message_id=inner.id,
+            media_urls=media_urls,
+            media_types=media_types,
         )
 
         # handle_message is BasePlatformAdapter's bridge into the gateway
