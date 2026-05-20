@@ -190,6 +190,16 @@ def on_pre_tool_call(
 
     queue_key = (task_id or session_id, tool_name)
 
+    # Diagnostic: how many adapters/dispatchers are live + which transport
+    # will receive the send. If active>1, two platform instances were
+    # registered and both ToolCallDispatchers will see calls.
+    logger.info(
+        "chat4000.pre_tool_call: adapter id=%s dispatcher=%s active_count=%d transport=%s",
+        id(adapter), id(adapter._tool_dispatcher),
+        len(_ACTIVE_ADAPTERS),
+        id(getattr(adapter, "_transport", None)),
+    )
+
     # Look up the tool's emoji from Hermes' central registry. This is the
     # same source Telegram, IRC and the CLI all use (`agent.display`),
     # so the iOS app gets the same per-tool icon vocabulary out of the
