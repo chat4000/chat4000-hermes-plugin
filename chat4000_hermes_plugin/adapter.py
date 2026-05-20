@@ -152,6 +152,17 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
                 runtime_log_level=account.runtime_log_level,
             )
         )
+
+        # Build the tool-call dispatcher at connect-time so plugin_hooks
+        # can push frames as soon as Hermes' tool_executor invokes our
+        # pre_tool_call / post_tool_call hooks. Previously this lived
+        # inside reply_pipeline_options() — which Hermes never calls on
+        # the standard run path — so the dispatcher was permanently None
+        # and every tool frame got dropped.
+        self._tool_dispatcher = ToolCallDispatcher(
+            send=lambda msg: self._transport.send(msg) if self._transport else None,  # type: ignore[union-attr]
+        )
+
         self._mark_connected()  # BasePlatformAdapter helper
         self._connected = True
         return True
