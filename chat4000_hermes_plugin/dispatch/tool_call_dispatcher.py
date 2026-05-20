@@ -98,6 +98,21 @@ class ToolCallDispatcher:
         )
         self._tools[tool_id] = state
 
+        # DIAGNOSTIC: log a 3-frame stack so we can identify duplicate
+        # callers when the iOS app shows two bubbles per logical tool.
+        import logging as _logging
+        import traceback as _tb
+        _log = _logging.getLogger(__name__)
+        frames = _tb.extract_stack(limit=6)[:-1]
+        caller_chain = " <- ".join(
+            f"{f.filename.rsplit('/',1)[-1]}:{f.lineno}({f.name})"
+            for f in frames[-4:]
+        )
+        _log.info(
+            "dispatcher.on_tool_start name=%s tool_id=%s caller=%s",
+            name, tool_id, caller_chain,
+        )
+
         args_str = self._encode_args(args)
         await self._send_or_await(
             OutboundToolStart(
