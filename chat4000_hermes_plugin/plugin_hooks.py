@@ -111,12 +111,17 @@ def on_pre_llm_call(
     BRAND-NEW sessions, so sessions that pre-date the plugin install
     would otherwise never be classified. pre_llm_call fills the gap on
     the first turn after install."""
+    logger.info(
+        "chat4000.pre_llm_call: session=%s platform=%r",
+        session_id, platform,
+    )
     if not session_id:
         return
     plat = (platform or "").strip().lower()
     if plat == "chat4000":
         if _SESSION_PLATFORM.get(session_id) != "chat4000":
             _SESSION_PLATFORM[session_id] = "chat4000"
+            logger.info("chat4000: recorded session %s for routing", session_id)
 
 
 def on_session_end(
@@ -164,8 +169,17 @@ def on_pre_tool_call(
     """Hermes calls this synchronously from agent.tool_executor BEFORE
     a tool runs. We emit a `tool_start` frame to the iOS app so the
     expandable bubble appears immediately."""
+    logger.info(
+        "chat4000.pre_tool_call: tool=%s session=%s task=%s tool_call_id=%s map_has=%s",
+        tool_name, session_id, task_id, tool_call_id,
+        _SESSION_PLATFORM.get(session_id or task_id),
+    )
     adapter = _adapter_for_session(session_id or task_id)
     if adapter is None or adapter._tool_dispatcher is None:
+        logger.info(
+            "chat4000.pre_tool_call: no adapter (active=%d, map=%s)",
+            len(_ACTIVE_ADAPTERS), dict(_SESSION_PLATFORM),
+        )
         return
 
     captured_id = tool_call_id
