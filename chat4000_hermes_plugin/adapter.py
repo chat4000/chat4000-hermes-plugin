@@ -509,7 +509,6 @@ def register(ctx) -> None:
     The registry call also wires CLI subcommands (`hermes chat4000 ...`)
     — those live in src/cli.py and use the same ctx.register_cli surface
     Hermes' built-in plugins use."""
-    from .cli import register_chat4000_cli
     from .telemetry import initialize_chat4000_telemetry
 
     initialize_chat4000_telemetry()
@@ -534,4 +533,10 @@ def register(ctx) -> None:
         emoji="🔐",
     )
 
-    register_chat4000_cli(ctx)
+    # CLI subcommands (hermes chat4000 pair / setup / ...) live in .cli
+    # and are gated behind ctx.register_cli, which isn't present on
+    # every Hermes version. Skip registration when the surface is
+    # missing rather than crashing the whole plugin load.
+    if hasattr(ctx, "register_cli"):
+        from .cli import register_chat4000_cli
+        register_chat4000_cli(ctx)
