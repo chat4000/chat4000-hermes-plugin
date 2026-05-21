@@ -241,7 +241,13 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
         wire_id = self._transport.send(OutboundText(text=text))
         return SendResult(success=True, message_id=wire_id)
 
-    async def send_typing(self, chat_id: str) -> None:
+    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        # Signature MUST match BasePlatformAdapter.send_typing(self,
+        # chat_id, metadata=None). Without the `metadata` kwarg, Hermes'
+        # _keep_typing loop calls `self.send_typing(chat_id, metadata=…)`
+        # → TypeError → silently swallowed → typing indicator never
+        # fires on the iOS side and the user waits seconds before any
+        # signal. This was the cause of the "5s till typing" report.
         if self._transport is None:
             return
         self._transport.send(OutboundStatus(status="typing"))
