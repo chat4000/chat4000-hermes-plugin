@@ -130,6 +130,58 @@ def on_pre_llm_call(
             logger.info("chat4000: recorded session %s for routing", session_id)
 
 
+def on_post_llm_call(
+    *,
+    session_id: str = "",
+    platform: str = "",
+    **_: Any,
+) -> None:
+    """End-of-turn sweep for orphan tool bubbles.
+
+    PATCH — see docs/patches-to-remember.md §P1.
+
+    Hermes' pre/post_tool_call hooks are asymmetric. `_AGENT_LOOP_TOOLS`
+    (todo, memory, session_search, delegate_task) are intercepted by
+    agent/tool_executor.py before reaching model_tools.handle_function_call,
+    so `pre_tool_call` fires but `post_tool_call` never does. The plugin's
+    correlation queue keeps the entry forever; iOS spinner spins forever.
+
+    post_llm_call fires at end of turn (conversation_loop.py:3965) and
+    carries session_id + platform. For chat4000 sessions, drain queued
+    orphans and emit synthetic tool_end frames so the iOS bubbles close.
+
+    Removed when Hermes fixes the asymmetry."""
+    if not session_id:
+        return
+    plat = (platform or "").strip().lower()
+    if plat != "chat4000":
+        return
+
+    orphans = [
+        (key, queue) for key, queue in list(_PENDING_TOOL_CALLS.items())
+        if key[0] == session_id and queue
+    ]
+    if not orphans:
+        return
+    logger.info(
+        "chat4000.post_llm_call: sweeping %d orphan tool bubble(s) for %s",
+        sum(len(q) for _, q in orphans), session_id,
+    )
+    for key, queue in orphans:
+        while queue:
+            adapter, our_id = queue.pop(0)
+            if adapter is None or adapter._tool_dispatcher is None:
+                continue
+
+            async def _emit_close(a=adapter, tid=our_id) -> None:
+                await a._tool_dispatcher.on_tool_end(
+                    tid, status="done", result=""
+                )
+
+            _schedule_async(adapter, _emit_close())
+        _PENDING_TOOL_CALLS.pop(key, None)
+
+
 def on_session_end(
     *,
     session_id: str = "",
@@ -285,6 +337,7 @@ def register_plugin_hooks(ctx) -> None:
         ctx.register_hook("on_session_start", on_session_start)
         ctx.register_hook("on_session_end", on_session_end)
         ctx.register_hook("pre_llm_call", on_pre_llm_call)
+        ctx.register_hook("post_llm_call", on_post_llm_call)
         ctx.register_hook("pre_tool_call", on_pre_tool_call)
         ctx.register_hook("post_tool_call", on_post_tool_call)
         logger.info("chat4000: tool-call hooks registered")
