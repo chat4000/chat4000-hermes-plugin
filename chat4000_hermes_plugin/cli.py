@@ -338,17 +338,18 @@ async def _run_pair_command(
     raw = (code or "").strip()
     code = _validate_user_supplied_code(raw) if raw else generate_pairing_code()
 
-    # The key is minted at plugin-load time (adapter.register), so by the
-    # time `pair` runs the file should already exist. If the user wiped
-    # state between gateway boot and `pair`, the account resolves with
-    # empty bytes — surface a clear error instead of silently re-minting,
-    # since a fresh key would orphan any already-paired devices.
+    # The key is normally minted at plugin-load time
+    # (adapter.register → ensure_stored_group_key). When the user runs
+    # `chat4000 pair` BEFORE the post-install gateway restart, no key
+    # exists yet — mint one here so pair still works in that order.
+    # Idempotent: if a key file already exists, we just load it.
+    from .key_store import ensure_stored_group_key
     if len(acct.group_key_bytes) != 32:
-        raise click.ClickException(
-            "No local chat4000 key found. (Re)start the Hermes gateway "
-            "to auto-mint one, then re-run `chat4000 pair`."
-        )
-    group_key_bytes = bytes(acct.group_key_bytes)
+        stored = ensure_stored_group_key(acct.account_id)
+        group_key_bytes = stored.group_key_bytes
+        click.echo(f"Minted local chat4000 key: {stored.path}")
+    else:
+        group_key_bytes = bytes(acct.group_key_bytes)
 
     click.echo(f"Pairing code: {code}")
     _render_qr_if_possible(f"chat4000://pair?code={code}")
