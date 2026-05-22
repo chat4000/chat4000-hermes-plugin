@@ -21,6 +21,9 @@ dependencies = [
   # Hermes already ships it transitively, but declare it explicitly so
   # the script also works when the plugin is installed outside Hermes.
   "click>=8.0",
+  # `rich` powers the `chat4000 wizard` interactive installer (colorful
+  # banners, panels, progress bars). Pure-Python, no compiled deps.
+  "rich>=13.0",
 ]
 
 [project.optional-dependencies]

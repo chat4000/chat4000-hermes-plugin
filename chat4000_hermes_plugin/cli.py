@@ -233,6 +233,14 @@ def _build_chat4000_cli():
         except Exception as exc:
             _handle_cli_error(exc)
 
+    @chat4000.command("wizard")
+    def cmd_wizard():
+        """Interactive install wizard — runs `pair` and brings the gateway
+        online with pretty progress + auto-detection of supervised vs.
+        bare Hermes installs. Invoked by `install.sh` after pip-install."""
+        from .install_wizard import main as wizard_main
+        sys.exit(wizard_main())
+
     # ─── Telemetry subgroup ───────────────────────────────────────────────
 
     @chat4000.group("telemetry")
