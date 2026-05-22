@@ -165,10 +165,15 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
 
         self._mark_connected()  # BasePlatformAdapter helper
         self._connected = True
+        from . import analytics
+        analytics.track("gateway_started", {"account_layout": "default"})
         return True
 
     async def disconnect(self) -> None:
         self._connected = False
+        from . import analytics
+        analytics.track("gateway_stopped", {})
+        analytics.flush()
         from .plugin_hooks import deregister_active_adapter
         deregister_active_adapter(self)
         self._abort_signal.set()
@@ -393,6 +398,12 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
             except Exception:
                 pass
 
+        # Track inbound — first message from app proves "everything works"
+        # end to end. Type-only, no content.
+        if is_from_app:
+            from . import analytics
+            analytics.track(f"message_received_{inner.t}", {})
+
         # Dispatch to the Hermes agent runner via BasePlatformAdapter.
         return asyncio.ensure_future(self._dispatch_to_agent(inner))
 
@@ -599,10 +610,16 @@ def register(ctx) -> None:
     The registry call also wires CLI subcommands (`hermes chat4000 ...`)
     — those live in src/cli.py and use the same ctx.register_cli surface
     Hermes' built-in plugins use."""
+    from . import analytics
     from .plugin_hooks import register_plugin_hooks
     from .telemetry import initialize_chat4000_telemetry
 
     initialize_chat4000_telemetry()
+    analytics.initialize_chat4000_analytics()
+    analytics.set_person_properties({
+        "plugin_version": analytics.PACKAGE_VERSION,
+        "os_platform": __import__("sys").platform,
+    })
 
     # Wire Hermes' cross-cutting tool-call hooks so the iOS app sees
     # tool_start / tool_end bubbles for every tool the agent invokes

@@ -260,6 +260,12 @@ def _build_chat4000_cli():
 
     @telemetry_group.command("disable")
     def cmd_tel_disable():
+        # Fire BEFORE writing the disabled flag so the opt-out itself is
+        # recorded (with bypass-pattern: track + flush, then disable).
+        from . import analytics
+        analytics.track("telemetry_preference_changed", {"enabled": False})
+        analytics.flush()
+        analytics.shutdown()
         set_telemetry_enabled(False)
         click.echo("Telemetry disabled. No data will be sent to chat4000.")
         click.echo("Re-enable: hermes chat4000 telemetry enable")
@@ -267,6 +273,10 @@ def _build_chat4000_cli():
     @telemetry_group.command("enable")
     def cmd_tel_enable():
         set_telemetry_enabled(True)
+        from . import analytics
+        analytics.initialize_chat4000_analytics()
+        analytics.track("telemetry_preference_changed", {"enabled": True})
+        analytics.flush()
         click.echo("Telemetry enabled. Anonymous error reports will be sent.")
         click.echo("Privacy policy: https://chat4000.com/privacy")
 

@@ -499,6 +499,8 @@ class RelayMessageTransport(MessageTransport):
                     if env_type == "hello_ok":
                         opened = True
                         self._current_send = send_envelope
+                        from .. import analytics
+                        analytics.track("relay_connected", {"relay_host": relay_url})
                         assert self._store is not None
                         self._current_batcher = RecvAckBatcher(
                             RecvAckBatcherOptions(
@@ -573,6 +575,8 @@ class RelayMessageTransport(MessageTransport):
                 self._current_send = None
                 if not opened:
                     raise RuntimeError("WebSocket closed before hello_ok")
+                from .. import analytics
+                analytics.track("relay_disconnected", {"reason": "ws_closed"})
                 self._set_state("reconnecting")
 
     async def _handle_inbound_msg(

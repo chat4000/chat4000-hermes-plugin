@@ -228,9 +228,12 @@ async def host_pairing_session(opts: PairHostOptions) -> PairHostResult:
     """Single-attempt host. Higher-level callers wrap this in a reconnect
     loop with `host_pairing_session_continuous` for App-Store-review-style
     repeated pairings."""
+    from . import analytics
+
     code = (opts.code or "").strip() or generate_pairing_code()
     normalized_code = normalize_pairing_code(code)
     room_id = derive_pairing_room_id(normalized_code)
+    analytics.track("pairing_started", {"flow": "host"})
     a_salt = secrets.token_bytes(32)
     import base64
 
@@ -299,6 +302,8 @@ async def host_pairing_session(opts: PairHostOptions) -> PairHostResult:
                 if env_type == "pair_complete":
                     log.log_finish("success", "pair_complete_received")
                     emit_status("completed", "Pairing complete")
+                    analytics.track("pairing_completed", {"flow": "host"})
+                    analytics.flush()
                     return PairHostResult(code=code, room_id=room_id)
 
                 if env_type != "pair_data":
@@ -382,14 +387,20 @@ async def host_pairing_session(opts: PairHostOptions) -> PairHostResult:
             log.log_ws_close(exc.code, str(exc.reason))
             log.log_finish("success", "closed_after_grant")
             emit_status("completed", "Pairing room closed after key transfer")
+            analytics.track("pairing_completed", {"flow": "host", "via": "closed_after_grant"})
+            analytics.flush()
             return PairHostResult(code=code, room_id=room_id)
         detail = f"Pairing socket closed ({exc.code})"
         log.log_ws_close(exc.code, str(exc.reason))
         log.log_finish("error", detail)
         dump_chat4000_trace("pair-host-close", exc, {"room_id": room_id})
         emit_status("closed", detail)
+        analytics.track("pairing_failed", {"flow": "host", "reason": "socket_closed", "ws_code": exc.code})
+        analytics.flush()
         raise RuntimeError(detail) from exc
 
+    analytics.track("pairing_failed", {"flow": "host", "reason": "stream_ended_without_complete"})
+    analytics.flush()
     raise RuntimeError("pairing stream ended without complete")
 
 

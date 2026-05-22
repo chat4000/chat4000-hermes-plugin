@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""installer.py — the actual install logic. Runs in the system Python
+(stdlib only). Detects Hermes, pip-installs the plugin into Hermes' venv,
+then execs `chat4000 wizard` which lives inside the just-installed venv.
+
+Designed to be downloaded by install.sh and run as a one-shot. All UI
+here uses ANSI escapes (no third-party deps) because the rich library
+isn't available until the plugin is installed. The wizard (post-install)
+uses rich.
+
+PostHog events fired by this file:
+  - installer_started
+  - installer_hermes_detected           {hermes_layout, hermes_path}
+  - installer_uv_detected               {uv_path}
+  - installer_pkg_installed             {installer_used, plugin_ref}
+  - installer_failed                    {stage, error_class, error_msg}
+  - installer_handing_off_to_wizard
+
+Analytics use the same install_id as the plugin's Sentry / runtime
+events, so the funnel is correlated across processes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+from typing import Optional
+
+# ─── Constants ────────────────────────────────────────────────────────────
+
+REPO_URL = "https://github.com/chat4000/chat4000-hermes-plugin"
+DEFAULT_REF = "stable"
+HERMES_LAYOUTS = [
+    ("/usr/local/lib/hermes-agent/venv/bin", "docker"),
+    (str(Path.home() / ".hermes/hermes-agent/venv/bin"), "curl-installer"),
+]
+
+# Public PostHog credentials — same project the iOS / Mac apps use.
+# Hardcoded here (no `import chat4000_hermes_plugin.analytics` yet — the
+# plugin isn't installed at this point in the lifecycle).
+POSTHOG_API_KEY = "phc_s49DnTamyFDnEC6MyumNmmjjf7p455LXCVzPE94hPemZ"
+POSTHOG_HOST = "https://us.i.posthog.com"
+POSTHOG_CAPTURE_URL = f"{POSTHOG_HOST}/capture/"
+
+# ─── ANSI ─────────────────────────────────────────────────────────────────
+
+if sys.stdout.isatty():
+    C_RED = "\033[1;31m"
+    C_GRN = "\033[1;32m"
+    C_YEL = "\033[1;33m"
+    C_BLU = "\033[1;34m"
+    C_MAG = "\033[1;35m"
+    C_CYN = "\033[1;36m"
+    C_DIM = "\033[2m"
+    C_RST = "\033[0m"
+    C_BOLD = "\033[1m"
+else:
+    C_RED = C_GRN = C_YEL = C_BLU = C_MAG = C_CYN = C_DIM = C_RST = C_BOLD = ""
+
+def say(msg: str) -> None: print(f"{C_CYN}>{C_RST} {msg}")
+def ok(msg: str) -> None: print(f"{C_GRN}✓{C_RST} {msg}")
+def warn(msg: str) -> None: print(f"{C_YEL}⚠{C_RST} {msg}")
+def err(msg: str) -> None: print(f"{C_RED}✗{C_RST} {msg}", file=sys.stderr)
+def hdr(msg: str) -> None:
+    line = "━" * 63
+    print(f"\n{C_MAG}{line}{C_RST}\n{C_MAG}{C_BOLD}{msg}{C_RST}\n{C_MAG}{line}{C_RST}\n")
+
+def banner() -> None:
+    print(f"\n{C_MAG}┌─────────────────────────────────────────────────────────────┐{C_RST}")
+    print(f"{C_MAG}│{C_RST}  {C_MAG}{C_BOLD}🔐 chat4000{C_RST}  ·  {C_BLU}{C_BOLD}Hermes plugin installer{C_RST}                       {C_MAG}│{C_RST}")
+    print(f"{C_MAG}│{C_RST}  {C_DIM}Native iPhone / Mac / CLI app for your Hermes agent{C_RST}        {C_MAG}│{C_RST}")
+    print(f"{C_MAG}└─────────────────────────────────────────────────────────────┘{C_RST}\n")
+
+# ─── install_id (matches what the plugin will use later) ──────────────────
+
+def resolve_install_id() -> str:
+    cfg = Path.home() / ".config" / "chat4000"
+    path = cfg / "install-id"
+    try:
+        if path.exists():
+            existing = path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        import uuid
+        new_id = str(uuid.uuid4())
+        cfg.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_id + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return new_id
+    except Exception:
+        import uuid
+        return str(uuid.uuid4())
+
+# ─── PostHog without the SDK (stdlib only) ────────────────────────────────
+
+import json
+import uuid
+
+_SESSION_ID = str(uuid.uuid4())
+_TELEMETRY_DISABLED = (
+    os.environ.get("CHAT4000_TELEMETRY_DISABLED", "").strip().lower() in ("1", "true", "yes")
+    or "--no-telemetry" in sys.argv
+)
+
+def track(event: str, props: Optional[dict] = None) -> None:
+    """Fire a PostHog capture event over plain HTTPS. Best-effort; never
+    raises. The plugin's own analytics.py uses the posthog SDK once the
+    plugin is installed; this is for pre-install events only."""
+    if _TELEMETRY_DISABLED:
+        return
+    enriched = {
+        "source": "hermes-plugin-installer",
+        "installer_version": "1.0.0",
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "os_platform": sys.platform,
+        "session_id": _SESSION_ID,
+    }
+    if props:
+        enriched.update(props)
+    body = json.dumps({
+        "api_key": POSTHOG_API_KEY,
+        "event": event,
+        "distinct_id": resolve_install_id(),
+        "properties": enriched,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        POSTHOG_CAPTURE_URL,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=3).read()
+    except Exception:
+        pass  # never break the install
+
+# ─── Detection ────────────────────────────────────────────────────────────
+
+def detect_hermes() -> Optional[tuple[str, str]]:
+    """Return (venv_bin_path, layout_label) or None."""
+    # Strategy 1: parse the wrapper script of `hermes` on PATH.
+    hermes_cmd = shutil.which("hermes")
+    if hermes_cmd:
+        try:
+            content = Path(hermes_cmd).read_text(errors="ignore")
+            import re
+            m = re.search(r"/[^\"'\s]+/venv/bin", content)
+            if m:
+                bin_path = m.group(0)
+                if Path(f"{bin_path}/python").exists():
+                    label = _layout_label(bin_path)
+                    return (bin_path, label)
+        except Exception:
+            pass
+    # Strategy 2: known layouts.
+    for path, label in HERMES_LAYOUTS:
+        if Path(f"{path}/python").exists():
+            return (path, label)
+    return None
+
+def _layout_label(path: str) -> str:
+    for known_path, label in HERMES_LAYOUTS:
+        if path == known_path:
+            return label
+    return "unknown"
+
+def detect_uv() -> Optional[str]:
+    p = shutil.which("uv")
+    if p:
+        return p
+    for cand in (
+        Path.home() / ".local" / "bin" / "uv",
+        Path("/usr/local/bin/uv"),
+        Path("/opt/homebrew/bin/uv"),
+    ):
+        if cand.exists() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+# ─── Install steps ────────────────────────────────────────────────────────
+
+def install_via_uv(uv: str, venv_python: str, ref: str) -> None:
+    subprocess.run(
+        [uv, "pip", "install", "--python", venv_python, f"git+{REPO_URL}@{ref}"],
+        check=True,
+    )
+
+def install_via_pip(venv_python: str, ref: str) -> None:
+    # Bootstrap pip if absent.
+    has_pip = subprocess.run(
+        [venv_python, "-c", "import pip"],
+        capture_output=True,
+    ).returncode == 0
+    if not has_pip:
+        say("Bootstrapping pip via ensurepip…")
+        if subprocess.run(
+            [venv_python, "-m", "ensurepip", "--upgrade"],
+            capture_output=True,
+        ).returncode != 0:
+            say("ensurepip failed — fetching get-pip.py")
+            with urllib.request.urlopen("https://bootstrap.pypa.io/get-pip.py", timeout=20) as resp:
+                bootstrap = resp.read()
+            subprocess.run([venv_python], input=bootstrap, check=True)
+    subprocess.run(
+        [venv_python, "-m", "pip", "install", "--upgrade", f"git+{REPO_URL}@{ref}"],
+        check=True,
+    )
+
+def uninstall(venv_python: str, uv: Optional[str]) -> None:
+    if uv:
+        subprocess.run(
+            [uv, "pip", "uninstall", "--python", venv_python, "chat4000-hermes-plugin"],
+            check=False,
+        )
+    else:
+        subprocess.run(
+            [venv_python, "-m", "pip", "uninstall", "-y", "chat4000-hermes-plugin"],
+            check=False,
+        )
+
+def reset_local_state() -> None:
+    state_dir = Path.home() / ".hermes" / "plugins" / "chat4000"
+    if state_dir.exists():
+        warn(f"Removing {state_dir} (key + ack store) — already-paired devices will fail to decrypt until re-paired.")
+        ans = input(f"{C_YEL}Continue? [y/N]:{C_RST} ").strip().lower()
+        if ans not in ("y", "yes"):
+            say("Reset cancelled.")
+            return
+        import shutil as _sh
+        _sh.rmtree(state_dir, ignore_errors=True)
+        ok(f"Removed {state_dir}")
+
+# ─── Main ─────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="chat4000 Hermes plugin installer",
+        add_help=True,
+    )
+    parser.add_argument("--no-wizard", action="store_true",
+                        help="install only, don't pair / restart gateway")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="remove the plugin from Hermes' venv")
+    parser.add_argument("--reset", action="store_true",
+                        help="wipe local key + ack store (destructive)")
+    parser.add_argument("--ref", default=DEFAULT_REF,
+                        help=f"git ref to install (default: {DEFAULT_REF})")
+    parser.add_argument("--verbose", action="store_true",
+                        help="echo every subprocess command")
+    parser.add_argument("--no-telemetry", action="store_true",
+                        help="disable PostHog + Sentry for this run")
+    args = parser.parse_args()
+
+    banner()
+    track("installer_started")
+
+    # 1. Detect Hermes ------------------------------------------------------
+    detected = detect_hermes()
+    if detected is None:
+        err("Could not locate Hermes venv. Looked at:")
+        err("  - PATH (`command -v hermes`)")
+        for path, label in HERMES_LAYOUTS:
+            err(f"  - {path} ({label})")
+        err("Install Hermes first, then re-run this script.")
+        track("installer_failed", {"stage": "detect_hermes", "error_class": "NotFound", "error_msg": "no hermes venv"})
+        return 1
+    venv_bin, layout = detected
+    ok(f"Hermes venv:  {C_CYN}{venv_bin}{C_RST}  {C_DIM}({layout}){C_RST}")
+    track("installer_hermes_detected", {"hermes_layout": layout, "hermes_path": venv_bin})
+    venv_python = f"{venv_bin}/python"
+
+    # 2. Uninstall / reset modes --------------------------------------------
+    if args.uninstall:
+        hdr("Uninstall mode")
+        uninstall(venv_python, detect_uv())
+        ok("Plugin uninstalled. Local key + state at ~/.hermes/plugins/chat4000 NOT removed (use --reset).")
+        return 0
+
+    if args.reset:
+        hdr("Reset mode (destructive)")
+        reset_local_state()
+
+    # 3. Install ------------------------------------------------------------
+    hdr(f"📦 Installing chat4000 plugin from {REPO_URL}@{args.ref}")
+    uv = detect_uv()
+    try:
+        if uv:
+            ok(f"Using uv at {C_CYN}{uv}{C_RST}")
+            track("installer_uv_detected", {"uv_path": uv})
+            install_via_uv(uv, venv_python, args.ref)
+            installer_used = "uv"
+        else:
+            warn("uv not found — falling back to venv pip")
+            install_via_pip(venv_python, args.ref)
+            installer_used = "pip"
+    except subprocess.CalledProcessError as exc:
+        err(f"Install failed: {exc}")
+        track("installer_failed", {
+            "stage": "pip_install", "error_class": type(exc).__name__,
+            "error_msg": str(exc)[:200], "installer_used": uv and "uv" or "pip",
+        })
+        return 1
+    ok("Plugin installed.")
+
+    # Verify import works
+    check = subprocess.run(
+        [venv_python, "-c", "import chat4000_hermes_plugin; print(chat4000_hermes_plugin.__name__)"],
+        capture_output=True, text=True,
+    )
+    if check.returncode != 0:
+        err("Plugin installed but import failed:")
+        err(check.stderr.strip())
+        track("installer_failed", {"stage": "import_check", "error_msg": check.stderr.strip()[:200]})
+        return 1
+
+    # Read installed plugin version for the event
+    ver = subprocess.run(
+        [venv_python, "-c", "from chat4000_hermes_plugin.package_info import read_package_version; print(read_package_version())"],
+        capture_output=True, text=True,
+    )
+    plugin_version = ver.stdout.strip() if ver.returncode == 0 else "unknown"
+    ok(f"Installed version: {C_GRN}{plugin_version}{C_RST}")
+    track("installer_pkg_installed", {
+        "installer_used": installer_used,
+        "plugin_ref": args.ref,
+        "plugin_version": plugin_version,
+    })
+
+    # 4. Wizard handoff -----------------------------------------------------
+    if args.no_wizard:
+        warn("Skipping wizard (--no-wizard). Next steps:")
+        print(f"  {C_CYN}{venv_bin}/chat4000 wizard{C_RST}")
+        return 0
+
+    hdr("🪄 Running install wizard")
+    track("installer_handing_off_to_wizard")
+    # exec so the wizard owns the real tty for Ctrl-C handling during pair.
+    os.execv(f"{venv_bin}/chat4000", [f"{venv_bin}/chat4000", "wizard"])
+
+if __name__ == "__main__":
+    sys.exit(main())

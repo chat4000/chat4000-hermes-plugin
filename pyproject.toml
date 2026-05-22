@@ -24,6 +24,9 @@ dependencies = [
   # `rich` powers the `chat4000 wizard` interactive installer (colorful
   # banners, panels, progress bars). Pure-Python, no compiled deps.
   "rich>=13.0",
+  # `posthog` powers product analytics (install funnel, pair success,
+  # message-throughput buckets). Same opt-out as Sentry telemetry.
+  "posthog>=3.0",
 ]
 
 [project.optional-dependencies]
