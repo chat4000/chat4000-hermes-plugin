@@ -339,6 +339,13 @@ async def _run_pair_command(
     code = _validate_user_supplied_code(raw) if raw else generate_pairing_code()
     group_key_bytes = _ensure_local_key_for_account(acct)
 
+    # (Re)start the gateway in the background BEFORE blocking on iPhone
+    # scan. This is the side-effect that lets the install be just two
+    # commands (`pip install` + `chat4000 pair`) — pair handles enabling
+    # the plugin in config, minting the key, AND making sure the gateway
+    # picks both up. Without this, users still need a 3rd command.
+    _restart_hermes_gateway()
+
     click.echo(f"Pairing code: {code}")
     _render_qr_if_possible(f"chat4000://pair?code={code}")
     click.echo("Press Ctrl-C to stop pairing.")
@@ -558,6 +565,56 @@ def _ensure_plugin_enabled_in_hermes_config() -> None:
     except Exception:
         # Auto-enable is best-effort — operator can always do it manually.
         pass
+
+
+def _restart_hermes_gateway() -> None:
+    """Bounce the Hermes gateway in the background.
+
+    Why this lives in the plugin: a fresh `chat4000 pair` may have
+    just enabled the plugin and minted the key. If the gateway was
+    already running, it never saw the config / validate_config change
+    (Hermes only discovers plugins at startup) and won't load chat4000
+    until restart. Bouncing makes the 2-command install actually work:
+
+        $ uv pip install ...
+        $ chat4000 pair      ← this also (re)starts the gateway
+
+    Best-effort. If we can't find `hermes` on PATH, no-op."""
+    import shutil
+    import subprocess
+
+    hermes = shutil.which("hermes")
+    if not hermes:
+        return
+    # Kill any existing gateway (SIGKILL — Hermes traps SIGTERM with a slow
+    # shutdown that can race with the new gateway's start).
+    try:
+        subprocess.run(
+            ["pkill", "-9", "-f", "hermes gateway run"],
+            capture_output=True, timeout=5,
+        )
+    except Exception:
+        pass
+    # Give the OS a tick to reap the killed process.
+    import time
+    time.sleep(1)
+    # Start a new gateway. nohup + start_new_session so the gateway
+    # survives the shell exiting / Ctrl-Z / ssh disconnect.
+    try:
+        log_path = "/tmp/gateway.log"
+        with open(log_path, "ab") as logf:
+            subprocess.Popen(
+                [hermes, "gateway", "run"],
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+        import click  # type: ignore[import-not-found]
+        click.echo(f"(Re)started Hermes gateway in background. Log: {log_path}")
+    except Exception as exc:
+        import click  # type: ignore[import-not-found]
+        click.echo(f"Note: could not auto-start gateway: {exc}", err=True)
 
 
 def _ensure_local_key_for_account(account) -> bytes:
