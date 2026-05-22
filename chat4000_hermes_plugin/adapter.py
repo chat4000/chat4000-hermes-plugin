@@ -599,22 +599,10 @@ def register(ctx) -> None:
     The registry call also wires CLI subcommands (`hermes chat4000 ...`)
     — those live in src/cli.py and use the same ctx.register_cli surface
     Hermes' built-in plugins use."""
-    from .key_store import ensure_stored_group_key
     from .plugin_hooks import register_plugin_hooks
     from .telemetry import initialize_chat4000_telemetry
 
     initialize_chat4000_telemetry()
-
-    # Mint the default-account group key at plugin load if it doesn't
-    # already exist. This moves the key-mint side-effect off of
-    # `chat4000 pair` and onto gateway boot, so `pair` is a pure pairing
-    # handshake. Best-effort: a read-only state dir or ownership mismatch
-    # falls through to the existing "not configured" error at adapter
-    # connect-time, which already has a usable error path.
-    try:
-        ensure_stored_group_key("default")
-    except Exception as exc:
-        logger.warning("chat4000: could not auto-mint default key: %s", exc)
 
     # Wire Hermes' cross-cutting tool-call hooks so the iOS app sees
     # tool_start / tool_end bubbles for every tool the agent invokes

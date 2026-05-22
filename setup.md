@@ -28,16 +28,18 @@ Replace `$HERMES_BIN` below with the correct `…/venv/bin` path you detected.
 # 1. Install the plugin into Hermes' venv
 uv pip install --python $HERMES_BIN/python git+https://github.com/chat4000/chat4000-hermes-plugin@stable
 
-# 2. (Re)start the gateway so it loads the new plugin (which mints the
-#    local group key on first import if missing)
-pkill -9 -f "hermes gateway run"; nohup hermes gateway run > /tmp/gateway.log 2>&1 & disown
-
-# 3. Pair a device — prints a code + QR, blocks until the iOS app scans
+# 2. Pair a device — mints the local key, prints a code + QR, blocks
+#    until the iOS app scans. Connects to the relay directly; no gateway
+#    needed yet.
 $HERMES_BIN/chat4000 pair
+
+# 3. (Re)start the gateway so it loads the new plugin + key and goes
+#    live on the relay
+pkill -9 -f "hermes gateway run"; nohup hermes gateway run > /tmp/gateway.log 2>&1 & disown
 ```
 
 That's it. Three commands. The user scans the QR with the chat4000
-iOS/macOS app and starts chatting.
+iOS/macOS app during step 2, and step 3 brings the gateway online.
 
 ## What the install does
 
@@ -45,14 +47,15 @@ iOS/macOS app and starts chatting.
   qrcode, sentry-sdk) into Hermes' venv.
 - Hermes auto-discovers the plugin via the `hermes_agent.plugins`
   entry-point group — no manual enable needed.
-- The gateway restart loads the chat4000 platform. On first load the
-  plugin's `register()` mints a 32-byte group key at
-  `~/.hermes/plugins/chat4000/keys/default.json` (mode 0600) if one
-  doesn't already exist. The adapter then opens a persistent WebSocket
-  to `wss://relay.chat4000.com/ws`.
-- `chat4000 pair` connects to the relay's pairing room, waits for the
-  joining device, ships the X25519-wrapped group key, then exits. It
-  does NOT touch local key state or the gateway process.
+- `chat4000 pair` mints the 32-byte group key at
+  `~/.hermes/plugins/chat4000/keys/default.json` (mode 0600) if missing,
+  then opens a direct WebSocket to the relay's pairing room. Idempotent
+  on re-runs — an existing key is loaded, not regenerated. No gateway
+  process required for this step.
+- The gateway restart loads the chat4000 platform. The adapter reads
+  the already-minted key from disk and opens a persistent WebSocket to
+  `wss://relay.chat4000.com/ws`. From this point on, messages from the
+  iOS app flow through to the Hermes agent.
 
 ## Verify
 
