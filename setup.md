@@ -26,7 +26,7 @@ Replace `$HERMES_BIN` below with the correct `…/venv/bin` path you detected.
 
 ```bash
 # 1. Install the plugin into Hermes' venv
-uv pip install --python $HERMES_BIN/python git+https://github.com/chat4000/chat4000-hermes-plugin
+uv pip install --python $HERMES_BIN/python git+https://github.com/chat4000/chat4000-hermes-plugin@1.0.0
 
 # 2. Pair a device — prints a code + QR, blocks until the iOS app scans
 $HERMES_BIN/chat4000 pair
