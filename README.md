@@ -9,7 +9,7 @@ Same wire protocol, pairing model, and crypto as the original
 
 ## What works
 
-- ✅ Pair an iPhone, Mac, or CLI client with `hermes chat4000 pair`
+- ✅ Pair an iPhone, Mac, or CLI client with the host-side `chat4000 pair` command
 - ✅ Send text / images / voice notes between agent and client
 - ✅ Streaming agent replies (text_delta / text_end per protocol §6.4.2)
 - ✅ Reliable delivery layer (recv_ack / relay_recv_ack per §6.6)
@@ -31,42 +31,55 @@ implementation runs underneath.
 
 ## Install
 
+For current Hermes builds, install the plugin by GitHub owner/repo, then
+pair a client and restart the gateway:
+
 ```sh
-hermes plugin install chat4000-hermes-plugin
+hermes plugins install chat4000/chat4000-hermes-plugin
+chat4000 pair
 hermes gateway restart
-hermes chat4000 pair
 ```
 
-Scan the QR code or type the 8-char code into the chat4000 client. Done.
+`chat4000 pair` prints a pairing code and QR payload, then waits for the
+chat4000 iOS/macOS app or CLI client to join. Keep it running while you
+scan the QR code or type the 8-character code into the client. When the
+command prints `Status: [5/5] Pairing complete`, restart the gateway so
+Hermes loads the new plugin state.
+
+If `chat4000` is not on `PATH`, run it from Hermes' venv, for example
+`~/.hermes/hermes-agent/venv/bin/chat4000 pair`.
+
+Do not use `hermes chat4000 pair` on Hermes versions that do not expose
+plugin CLI groups as top-level commands.
 
 ## Files
 
 | File | Lines | Purpose |
 |---|---:|---|
-| `src/adapter.py` | ~430 | Chat4000Adapter — Hermes BasePlatformAdapter |
-| `src/transport/relay.py` | ~480 | WebSocket transport + §6.6 ack flow |
-| `src/transport/__init__.py` | ~80 | MessageTransport ABC |
-| `src/transport/registry.py` | ~40 | Per-account transport singleton |
-| `src/transport/mock.py` | ~140 | Test mock |
-| `src/pairing.py` | ~360 | Joiner + initiator pairing |
-| `src/crypto.py` | ~190 | XChaCha20-Poly1305 + X25519 wrap |
-| `src/ack_store.py` | ~170 | SQLite watermark + dedup |
-| `src/recv_ack_batcher.py` | ~170 | Flow A cumulative ack |
-| `src/dispatch/stream_dispatcher.py` | ~230 | §6.4.2 text streaming invariants |
-| `src/dispatch/tool_call_dispatcher.py` | ~210 | Tool-call streaming (NEW) |
-| `src/key_store.py` | ~220 | Group-key file storage |
-| `src/accounts.py` | ~130 | Config resolution |
-| `src/session_binding.py` | ~210 | Hermes session ↔ chat4000 group |
-| `src/cli.py` | ~360 | `hermes chat4000 *` commands |
-| `src/types.py` | ~270 | Wire-type dataclasses |
-| `src/telemetry.py` | ~210 | Sentry — opt-in, on by default |
-| `src/runtime_logger.py` | ~80 | Structured runtime log |
-| `src/pairing_logger.py` | ~130 | Pairing trace log |
-| `src/error_log.py` | ~70 | Crash trace dump |
-| `src/log_rotate.py` | ~30 | 10 MB log rotation |
-| `src/reconnect.py` | ~50 | Exponential backoff |
-| `src/ws_keepalive.py` | ~20 | WS-frame keepalive kwargs |
-| `src/package_info.py` | ~25 | Version from pyproject.toml |
+| `chat4000_hermes_plugin/adapter.py` | ~430 | Chat4000Adapter — Hermes BasePlatformAdapter |
+| `chat4000_hermes_plugin/transport/relay.py` | ~480 | WebSocket transport + §6.6 ack flow |
+| `chat4000_hermes_plugin/transport/__init__.py` | ~80 | MessageTransport ABC |
+| `chat4000_hermes_plugin/transport/registry.py` | ~40 | Per-account transport singleton |
+| `chat4000_hermes_plugin/transport/mock.py` | ~140 | Test mock |
+| `chat4000_hermes_plugin/pairing.py` | ~360 | Joiner + initiator pairing |
+| `chat4000_hermes_plugin/crypto.py` | ~190 | XChaCha20-Poly1305 + X25519 wrap |
+| `chat4000_hermes_plugin/ack_store.py` | ~170 | SQLite watermark + dedup |
+| `chat4000_hermes_plugin/recv_ack_batcher.py` | ~170 | Flow A cumulative ack |
+| `chat4000_hermes_plugin/dispatch/stream_dispatcher.py` | ~230 | §6.4.2 text streaming invariants |
+| `chat4000_hermes_plugin/dispatch/tool_call_dispatcher.py` | ~210 | Tool-call streaming (NEW) |
+| `chat4000_hermes_plugin/key_store.py` | ~220 | Group-key file storage |
+| `chat4000_hermes_plugin/accounts.py` | ~130 | Config resolution |
+| `chat4000_hermes_plugin/session_binding.py` | ~210 | Hermes session ↔ chat4000 group |
+| `chat4000_hermes_plugin/cli.py` | ~360 | `chat4000 *` host-side commands |
+| `chat4000_hermes_plugin/protocol_types.py` | ~270 | Wire-type dataclasses |
+| `chat4000_hermes_plugin/telemetry.py` | ~210 | Sentry — opt-in, on by default |
+| `chat4000_hermes_plugin/runtime_logger.py` | ~80 | Structured runtime log |
+| `chat4000_hermes_plugin/pairing_logger.py` | ~130 | Pairing trace log |
+| `chat4000_hermes_plugin/error_log.py` | ~70 | Crash trace dump |
+| `chat4000_hermes_plugin/log_rotate.py` | ~30 | 10 MB log rotation |
+| `chat4000_hermes_plugin/reconnect.py` | ~50 | Exponential backoff |
+| `chat4000_hermes_plugin/ws_keepalive.py` | ~20 | WS-frame keepalive kwargs |
+| `chat4000_hermes_plugin/package_info.py` | ~25 | Version from pyproject.toml |
 
 ## Tool calls
 
@@ -99,9 +112,9 @@ receivers silently ignore.
 Anonymous Sentry crash reports, on by default. Opt out three ways:
 
 ```sh
-hermes chat4000 telemetry disable
+chat4000 telemetry disable
 export CHAT4000_TELEMETRY_DISABLED=1
-hermes chat4000 --no-telemetry <command>
+chat4000 --no-telemetry <command>
 ```
 
 ## License

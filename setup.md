@@ -22,24 +22,38 @@ Pick whichever exists. If both somehow exist, use the one that
 
 ## Install
 
-Replace `$HERMES_BIN` below with the correct `…/venv/bin` path you detected.
+For a packaged install, install the plugin into Hermes' Python
+environment so the `chat4000` host-side CLI is created:
 
 ```bash
 # 1. Install the plugin into Hermes' venv
 uv pip install --python $HERMES_BIN/python git+https://github.com/chat4000/chat4000-hermes-plugin@stable
 
 # 2. Pair a device — mints the local key, prints a code + QR, blocks
-#    until the iOS app scans. Connects to the relay directly; no gateway
-#    needed yet.
+#    until the iOS/macOS app or CLI client joins. Connects to the relay
+#    directly; no gateway needed yet.
 $HERMES_BIN/chat4000 pair
 
 # 3. (Re)start the gateway so it loads the new plugin + key and goes
-#    live on the relay
-pkill -9 -f "hermes gateway run"; nohup hermes gateway run > /tmp/gateway.log 2>&1 & disown
+#    live on the relay.
+hermes gateway restart
 ```
 
-That's it. Three commands. The user scans the QR with the chat4000
-iOS/macOS app during step 2, and step 3 brings the gateway online.
+For Hermes' Git plugin installer, use the owner/repo form:
+
+```bash
+hermes plugins install chat4000/chat4000-hermes-plugin
+```
+
+If `chat4000` is not on `PATH`, run it from Hermes' venv, for example:
+
+```bash
+$HERMES_BIN/chat4000 pair
+```
+
+The pair command prints a QR/code and waits. Scan the QR or enter the
+8-character code in the chat4000 client. When it prints
+`Status: [5/5] Pairing complete`, restart the gateway.
 
 ## What the install does
 
@@ -81,13 +95,14 @@ they re-pair.
 ## Troubleshooting
 
 - **"plugin chat4000 is registered but adapter creation failed"** —
-  no group key. Run `chat4000 setup --no-pair` then restart gateway.
-- **iOS app stuck waiting for join** — wrong code. Codes are 8 chars
+  no group key. Run `chat4000 setup --no-pair` or `chat4000 pair`, then
+  restart gateway.
+- **iOS/macOS app stuck waiting for join** — wrong code. Codes are 8 chars
   from `ABCDEFGHJKMNPRTUVWXYZ2346789` (no 0/1/5/I/L/O/S).
 - **No typing indicator** — make sure the plugin version is ≥`b876ccb`
   (the send_typing signature fix). `uv pip install --upgrade --reinstall ...`
 - **Gateway doesn't see the plugin** — discovery runs at startup only.
-  Restart with `pkill -9 -f "hermes gateway run"; nohup hermes gateway run > /tmp/gateway.log 2>&1 & disown`.
+  Restart with `hermes gateway restart`.
 
 ## Source
 
