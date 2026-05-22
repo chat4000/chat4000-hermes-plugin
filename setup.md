@@ -32,7 +32,7 @@ uv pip install --python $HERMES_BIN/python git+https://github.com/chat4000/chat4
 $HERMES_BIN/chat4000 pair
 
 # 3. (Re)start the gateway so it discovers the new plugin
-pkill -f "hermes gateway run"; hermes gateway run &
+pkill -9 -f "hermes gateway run"; nohup hermes gateway run > /tmp/gateway.log 2>&1 & disown
 ```
 
 That's it. Three commands. The user scans the QR with the chat4000
@@ -81,7 +81,7 @@ they re-pair.
 - **No typing indicator** — make sure the plugin version is ≥`b876ccb`
   (the send_typing signature fix). `uv pip install --upgrade --reinstall ...`
 - **Gateway doesn't see the plugin** — discovery runs at startup only.
-  Restart with `pkill -f "hermes gateway run"; hermes gateway run &`.
+  Restart with `pkill -9 -f "hermes gateway run"; nohup hermes gateway run > /tmp/gateway.log 2>&1 & disown`.
 
 ## Source
 
