@@ -73,8 +73,33 @@ from typing import Optional
 REPO_URL = "https://github.com/chat4000/chat4000-hermes-plugin"
 DEFAULT_REF = "stable"
 HERMES_LAYOUTS = [
-    ("/usr/local/lib/hermes-agent/venv/bin", "docker"),
-    (str(Path.home() / ".hermes/hermes-agent/venv/bin"), "curl-installer"),
+    # Direct paths first — fastest path on the most common installs.
+    # `${HOME}/...` and `/...` are expanded with Path(...).expanduser()
+    # at lookup time. Paths with `*` are globbed (used for Homebrew
+    # Cellar version dirs).
+    ("~/.hermes/hermes-agent/venv/bin", "curl-installer"),
+    ("/usr/local/lib/hermes-agent/venv/bin", "fhs-source"),
+    ("/opt/hermes/.venv/bin", "docker"),
+    # Homebrew (glob the version segment)
+    ("/opt/homebrew/Cellar/hermes-agent/*/libexec/bin", "homebrew-arm64"),
+    ("/usr/local/Cellar/hermes-agent/*/libexec/bin", "homebrew-intel"),
+    ("/home/linuxbrew/.linuxbrew/Cellar/hermes-agent/*/libexec/bin", "linuxbrew"),
+    # pipx (modern XDG + legacy)
+    ("~/.local/share/pipx/venvs/hermes-agent/bin", "pipx-modern"),
+    ("~/.local/pipx/venvs/hermes-agent/bin", "pipx-legacy"),
+    # uv tool install
+    ("~/.local/share/uv/tools/hermes-agent/bin", "uv-tool"),
+    # Linux distro-style repacks
+    ("/opt/venvs/hermes-agent/bin", "dh-virtualenv"),
+    ("/usr/share/hermes-agent/venv/bin", "deb-alt"),
+    ("/usr/lib/hermes-agent/venv/bin", "rpm"),
+    ("/usr/libexec/hermes-agent/venv/bin", "rpm-libexec"),
+    ("/opt/hermes-agent/venv/bin", "rpm-opt"),
+    # Local-prefix source installs
+    ("~/.local/lib/hermes-agent/venv/bin", "user-prefix"),
+    ("~/.local/share/hermes-agent/venv/bin", "xdg-data"),
+    # macOS user library (defensive — no documented installer uses it)
+    ("~/Library/Application Support/Hermes Agent/venv/bin", "macos-app-support"),
 ]
 
 # Public PostHog credentials — same project the iOS / Mac apps use.
@@ -345,30 +370,89 @@ def send_sentry_envelope(exc: BaseException, *, tags: Optional[dict] = None) -> 
 # ─── Detection ────────────────────────────────────────────────────────────
 
 def detect_hermes() -> Optional[tuple[str, str]]:
-    """Return (venv_bin_path, layout_label) or None."""
-    # Strategy 1: parse the wrapper script of `hermes` on PATH.
+    """Return (venv_bin_path, layout_label) or None.
+
+    Probes in order:
+      1. $HERMES_INSTALL_DIR / $HERMES_HOME / $VIRTUAL_ENV env-var overrides
+      2. `hermes` on PATH: parse the wrapper for a `/.../venv/bin` substring;
+         if it's a symlink/shim, resolve and use the resolved dir
+      3. Known layouts in HERMES_LAYOUTS (glob-aware for Homebrew Cellar)"""
+    import re
+    # 1. Env-var overrides (project-owned). Highest priority.
+    install_dir = (os.environ.get("HERMES_INSTALL_DIR") or "").strip()
+    if install_dir:
+        p = str(Path(install_dir).expanduser() / "venv" / "bin")
+        if Path(f"{p}/python").exists():
+            return (p, "env:HERMES_INSTALL_DIR")
+    hermes_home = (os.environ.get("HERMES_HOME") or "").strip()
+    if hermes_home:
+        p = str(Path(hermes_home).expanduser() / "hermes-agent" / "venv" / "bin")
+        if Path(f"{p}/python").exists():
+            return (p, "env:HERMES_HOME")
+    venv = (os.environ.get("VIRTUAL_ENV") or "").strip()
+    if venv:
+        p = str(Path(venv).expanduser() / "bin")
+        if Path(f"{p}/hermes").exists() and Path(f"{p}/python").exists():
+            return (p, "env:VIRTUAL_ENV")
+
+    # 2. `hermes` on PATH — try wrapper-grep, then resolve as symlink.
     hermes_cmd = shutil.which("hermes")
     if hermes_cmd:
         try:
             content = Path(hermes_cmd).read_text(errors="ignore")
-            import re
-            m = re.search(r"/[^\"'\s]+/venv/bin", content)
-            if m:
-                bin_path = m.group(0)
-                if Path(f"{bin_path}/python").exists():
-                    label = _layout_label(bin_path)
-                    return (bin_path, label)
+            # Match `/.../venv/bin` or `/.../.venv/bin` or `/.../-env-<ver>/bin` (Nix)
+            for pat in (
+                r"/[^\"'\s]+/\.?venv/bin",
+                r"/nix/store/[^\"'\s]+-hermes-agent-env-[^/]+/bin",
+            ):
+                m = re.search(pat, content)
+                if m:
+                    bin_path = m.group(0)
+                    if Path(f"{bin_path}/python").exists() or Path(f"{bin_path}/hermes").exists():
+                        return (bin_path, _layout_label(bin_path))
         except Exception:
             pass
-    # Strategy 2: known layouts.
-    for path, label in HERMES_LAYOUTS:
-        if Path(f"{path}/python").exists():
-            return (path, label)
+        # Wrapper-grep missed (symlink, PE launcher, makeWrapper script).
+        # Resolve and accept the resolved dir if it has python.
+        try:
+            real = Path(hermes_cmd).resolve()
+            bin_path = str(real.parent)
+            if Path(f"{bin_path}/python").exists():
+                return (bin_path, _layout_label(bin_path))
+        except Exception:
+            pass
+
+    # 3. Known layouts with glob support (Homebrew Cellar version dirs).
+    for pattern, label in HERMES_LAYOUTS:
+        expanded = str(Path(pattern).expanduser())
+        if "*" in expanded:
+            # Glob the pattern; pick the highest-versioned match
+            # (last sorted = newest version directory).
+            try:
+                matches = sorted(Path("/").glob(expanded.lstrip("/")))
+                for match in reversed(matches):
+                    if (match / "python").exists():
+                        return (str(match), label)
+            except Exception:
+                continue
+        else:
+            if (Path(expanded) / "python").exists():
+                return (expanded, label)
     return None
 
+
 def _layout_label(path: str) -> str:
-    for known_path, label in HERMES_LAYOUTS:
-        if path == known_path:
+    if "/nix/store/" in path:
+        return "nix"
+    for pattern, label in HERMES_LAYOUTS:
+        expanded = str(Path(pattern).expanduser())
+        if "*" in expanded:
+            # Compare with glob: replace * with regex .*
+            import re as _re
+            rx = _re.escape(expanded).replace(r"\*", "[^/]+")
+            if _re.fullmatch(rx, path):
+                return label
+        elif path == expanded:
             return label
     return "unknown"
 
@@ -470,42 +554,88 @@ def main() -> int:
     _emit("installer_started")
 
     # 1. Detect Hermes ------------------------------------------------------
+    venv_bin = None
+    layout = None
     if args.hermes_bin:
-        venv_bin = args.hermes_bin.rstrip("/")
-        if not Path(f"{venv_bin}/python").exists():
-            err(f"--hermes-bin {venv_bin}: no `python` found there.")
+        candidate = str(Path(args.hermes_bin.rstrip("/")).expanduser())
+        if not Path(f"{candidate}/python").exists():
+            err(f"--hermes-bin {candidate}: no `python` found there.")
             err("Make sure the path is the directory containing `python` and `hermes`")
-            err("(e.g. /opt/homebrew/Cellar/hermes-agent/2026.5.0/venv/bin).")
+            err("(e.g. /opt/homebrew/Cellar/hermes-agent/2026.5.16/libexec/bin).")
             _emit("installer_failed", {
                 "stage": "detect_hermes",
                 "error_class": "InvalidHermesBin",
-                "error_msg": f"no python at {venv_bin}/python",
+                "error_msg": f"no python at {candidate}/python",
             })
             return 1
+        venv_bin = candidate
         layout = "user-override"
         ok(f"Hermes venv:  {C_CYN}{venv_bin}{C_RST}  {C_DIM}(via --hermes-bin){C_RST}")
     else:
         detected = detect_hermes()
-        if detected is None:
+        if detected is not None:
+            venv_bin, layout = detected
+            ok(f"Hermes venv:  {C_CYN}{venv_bin}{C_RST}  {C_DIM}({layout}){C_RST}")
+        else:
+            print()
             err("Hey — we couldn't find where you installed Hermes.")
-            err("")
-            err("We looked here:")
-            err(f"  - PATH (`command -v hermes`)")
-            for path, label in HERMES_LAYOUTS:
-                err(f"  - {path} {C_DIM}({label}){C_RST}")
-            err("")
-            err("If Hermes is installed somewhere else, tell us where with")
-            err(f"{C_CYN}--hermes-bin{C_RST} (the directory that contains `python` and `hermes`).")
-            err("")
-            err("Examples:")
-            err(f"  {C_CYN}curl -fsSL https://raw.githubusercontent.com/chat4000/chat4000-hermes-plugin/stable/install.sh | bash -s -- --hermes-bin /opt/homebrew/Cellar/hermes-agent/2026.5.0/venv/bin{C_RST}")
-            err(f"  {C_CYN}curl -fsSL ... | bash -s -- --hermes-bin ~/.local/share/hermes/venv/bin{C_RST}")
-            err("")
-            err(f"Or run {C_CYN}install.sh --help{C_RST} for the full flag list.")
-            _emit("installer_failed", {"stage": "detect_hermes", "error_class": "NotFound", "error_msg": "no hermes venv"})
-            return 1
-        venv_bin, layout = detected
-        ok(f"Hermes venv:  {C_CYN}{venv_bin}{C_RST}  {C_DIM}({layout}){C_RST}")
+            print()
+            print(f"We looked here:")
+            print(f"  · env vars {C_DIM}HERMES_INSTALL_DIR / HERMES_HOME / VIRTUAL_ENV{C_RST}")
+            print(f"  · {C_CYN}hermes{C_RST} on PATH")
+            for pattern, label in HERMES_LAYOUTS:
+                print(f"  · {pattern}  {C_DIM}({label}){C_RST}")
+            print()
+            print(f"{C_BOLD}Tell us where it is, or cancel:{C_RST}")
+            print(f"  · type the path to the directory containing {C_CYN}python{C_RST} and {C_CYN}hermes{C_RST}")
+            print(f"  · or press {C_CYN}Ctrl+C{C_RST} to cancel and re-run with arguments")
+            print()
+            print(f"{C_BOLD}Examples of a valid path:{C_RST}")
+            print(f"  /opt/homebrew/Cellar/hermes-agent/2026.5.16/libexec/bin")
+            print(f"  ~/.local/share/uv/tools/hermes-agent/bin")
+            print(f"  /opt/venvs/hermes-agent/bin")
+            print()
+            print(f"{C_BOLD}Or re-run from your shell:{C_RST}")
+            print(f"  {C_CYN}curl ... | bash -s -- --hermes-bin /your/path/to/venv/bin{C_RST}")
+            print(f"  {C_CYN}curl ... | bash -s -- --help{C_RST}  {C_DIM}(see all flags){C_RST}")
+            print()
+            if not sys.stdin.isatty():
+                err("(non-interactive shell — cannot prompt. Re-run interactively or pass --hermes-bin.)")
+                _emit("installer_failed", {
+                    "stage": "detect_hermes",
+                    "error_class": "NotFound",
+                    "error_msg": "no hermes venv; non-interactive shell",
+                })
+                return 1
+            try:
+                user_input = input(f"{C_CYN}? Hermes venv-bin path:{C_RST} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                warn("Cancelled.")
+                _emit("installer_cancelled", {"stage": "detect_hermes_prompt"})
+                return 130
+            if not user_input:
+                err("Empty path. Bailing.")
+                _emit("installer_failed", {
+                    "stage": "detect_hermes",
+                    "error_class": "NotFound",
+                    "error_msg": "no hermes venv; empty user input",
+                })
+                return 1
+            candidate = str(Path(user_input).expanduser())
+            if not Path(f"{candidate}/python").exists():
+                err(f"No `python` found at {candidate}. Bailing.")
+                _emit("installer_failed", {
+                    "stage": "detect_hermes",
+                    "error_class": "InvalidUserInput",
+                    "error_msg": f"no python at {candidate}/python",
+                    "user_input_path": candidate,
+                })
+                return 1
+            venv_bin = candidate
+            layout = "user-input"
+            ok(f"Hermes venv:  {C_CYN}{venv_bin}{C_RST}  {C_DIM}(via user input){C_RST}")
+            _emit("installer_hermes_path_via_user_input", {"hermes_path": venv_bin})
     _emit("installer_hermes_detected", {"hermes_layout": layout, "hermes_path": venv_bin})
     venv_python = f"{venv_bin}/python"
 
