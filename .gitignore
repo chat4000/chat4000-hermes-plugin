@@ -10,4 +10,7 @@ dist/
 .venv/
 venv/
 .env
+# Sentry DSN is public-by-design (client-side ingestion endpoint, not
+# a secret) — committed at chat4000_hermes_plugin/telemetry_dsn_generated.py.
+# Old `src/` path is from the TS-port days; kept here defensively.
 src/telemetry_dsn_generated.py
