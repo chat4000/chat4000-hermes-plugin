@@ -299,6 +299,12 @@ async def _run_interactive_setup(
     pll = _normalize_log_level(pairing_log_level or acct.pairing_log_level)
     rll = _normalize_log_level(runtime_log_level or acct.runtime_log_level)
 
+    # Ensure Hermes' config.yaml lists chat4000 in plugins.enabled. Pip-
+    # installed plugins are discovered via entry-points but only loaded
+    # when explicitly enabled in config — this auto-enable line means
+    # the install runbook stays 3 commands without a separate edit step.
+    _ensure_plugin_enabled_in_hermes_config()
+
     # Persist channel config back into Hermes' config.yaml via core's
     # writer. Hermes core exposes this on the ctx — but inside a CLI
     # command we don't have ctx, so we just mint the key file and let
@@ -325,6 +331,7 @@ async def _run_pair_command(
 ) -> bool:
     import click  # type: ignore[import-not-found]
 
+    _ensure_plugin_enabled_in_hermes_config()
     cfg = _load_hermes_config()
     acct = resolve_chat4000_account(cfg, account_id)
     pll = _normalize_log_level(pairing_log_level or acct.pairing_log_level)
@@ -391,6 +398,7 @@ async def _run_pair_many_command(
     from .pairing import ContinuousHostOptions
 
     code = _validate_user_supplied_code(code)
+    _ensure_plugin_enabled_in_hermes_config()
     cfg = _load_hermes_config()
     acct = resolve_chat4000_account(cfg, account_id)
     pll = _normalize_log_level(pairing_log_level or acct.pairing_log_level)
@@ -505,6 +513,51 @@ def _load_hermes_config() -> dict:
         return {"channels": {"chat4000": channel}}
     except Exception:
         return {}
+
+
+def _ensure_plugin_enabled_in_hermes_config() -> None:
+    """Add 'chat4000' to Hermes' `plugins.enabled` list in config.yaml.
+
+    Pip-installed plugins are discovered via the `hermes_agent.plugins`
+    entry-point but only ACTIVATED when their name appears in
+    `plugins.enabled`. `hermes plugins enable chat4000` only works for
+    directory-installed plugins (Hermes CLI gap), so we write the config
+    ourselves the first time the user runs a CLI command. Idempotent.
+
+    Runs at every CLI entry-point so users who pip-install and reset
+    config don't end up with a broken state — re-running `chat4000
+    pair` repairs the config too."""
+    try:
+        import yaml  # type: ignore[import-not-found]
+        from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+    except Exception:
+        return
+    try:
+        cfg_path = get_hermes_home() / "config.yaml"
+    except Exception:
+        return
+    try:
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        plugins = cfg.setdefault("plugins", {})
+        if not isinstance(plugins, dict):
+            plugins = {}
+            cfg["plugins"] = plugins
+        enabled = plugins.setdefault("enabled", [])
+        if not isinstance(enabled, list):
+            enabled = []
+            plugins["enabled"] = enabled
+        if "chat4000" in enabled:
+            return  # already enabled, no-op
+        enabled.append("chat4000")
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        import click  # type: ignore[import-not-found]
+        click.echo(f"Enabled chat4000 in Hermes config: {cfg_path}")
+    except Exception:
+        # Auto-enable is best-effort — operator can always do it manually.
+        pass
 
 
 def _ensure_local_key_for_account(account) -> bytes:
