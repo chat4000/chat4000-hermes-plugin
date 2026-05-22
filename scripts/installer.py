@@ -90,6 +90,11 @@ POSTHOG_CAPTURE_URL = f"{POSTHOG_HOST}/capture/"
 SENTRY_DSN = "https://ac3dabffdf2c91c9c90a87cd9b258908@o4511305222193152.ingest.us.sentry.io/4511433133129728"
 INSTALLER_RELEASE = "chat4000-hermes-plugin-installer@1.0.0"
 
+import platform
+import time
+
+_STARTED_AT_MS = int(time.time() * 1000)
+
 # ─── ANSI ─────────────────────────────────────────────────────────────────
 
 if sys.stdout.isatty():
@@ -153,10 +158,7 @@ _TELEMETRY_DISABLED = (
     or "--no-telemetry" in sys.argv
 )
 
-def track(event: str, props: Optional[dict] = None) -> None:
-    """Fire a PostHog capture event over plain HTTPS. Best-effort; never
-    raises. The plugin's own analytics.py uses the posthog SDK once the
-    plugin is installed; this is for pre-install events only."""
+def _emit(event: str, props: Optional[dict] = None) -> None:
     if _TELEMETRY_DISABLED:
         return
     enriched = {
@@ -165,7 +167,61 @@ def track(event: str, props: Optional[dict] = None) -> None:
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "os_platform": sys.platform,
         "session_id": _SESSION_ID,
+        "arch": platform.machine() or "unknown",
+        "cpu_count": os.cpu_count() or 0,
+        "locale": (os.environ.get("LANG") or "").split(".")[0] or "unknown",
+        "since_start_ms": int(time.time() * 1000) - _STARTED_AT_MS,
+        "is_root": hasattr(os, "geteuid") and os.geteuid() == 0,
     }
+    try:
+        sysname = platform.system()
+        if sysname == "Linux":
+            os_rel = f"Linux {platform.release()}"
+            try:
+                for line in Path("/etc/os-release").read_text(errors="ignore").splitlines():
+                    if line.startswith("PRETTY_NAME="):
+                        os_rel = line.split("=", 1)[1].strip().strip('"')
+                        break
+            except Exception:
+                pass
+            enriched["os_release"] = os_rel
+        elif sysname == "Darwin":
+            mv = platform.mac_ver()[0]
+            enriched["os_release"] = f"macOS {mv}" if mv else f"Darwin {platform.release()}"
+        elif sysname == "Windows":
+            wv = platform.win32_ver()[0]
+            enriched["os_release"] = f"Windows {wv}" if wv else "Windows"
+        else:
+            enriched["os_release"] = f"{sysname} {platform.release()}".strip()
+    except Exception:
+        enriched["os_release"] = "unknown"
+    try:
+        in_container = False
+        if Path("/.dockerenv").exists() or os.environ.get("KUBERNETES_SERVICE_HOST"):
+            in_container = True
+        else:
+            cgroup = Path("/proc/1/cgroup").read_text(errors="ignore")
+            in_container = any(s in cgroup for s in ("docker", "kubepods", "containerd", "podman"))
+        enriched["is_container"] = in_container
+    except Exception:
+        enriched["is_container"] = False
+    try:
+        argv_out, skip_next = [], False
+        for a in sys.argv[1:]:
+            if skip_next:
+                argv_out.append("<redacted>"); skip_next = False; continue
+            if "=" in a:
+                k = a.partition("=")[0]
+                if any(s in k.lower() for s in ("token", "key", "secret", "pass", "dsn")):
+                    argv_out.append(f"{k}=<redacted>"); continue
+            if a.startswith(("sk-", "phc_", "ghp_", "Bearer")):
+                argv_out.append("<redacted>"); continue
+            if a in ("--token", "--api-key", "--secret", "--password", "--dsn"):
+                argv_out.append(a); skip_next = True; continue
+            argv_out.append(a)
+        enriched["flags"] = argv_out
+    except Exception:
+        pass
     if props:
         enriched.update(props)
     body = json.dumps({
@@ -401,24 +457,56 @@ def main() -> int:
                         help="echo every subprocess command")
     parser.add_argument("--no-telemetry", action="store_true",
                         help="disable PostHog + Sentry for this run")
+    parser.add_argument("--hermes-bin", default=None,
+                        metavar="PATH",
+                        help=(
+                            "Skip auto-detection and use this Hermes venv directly. "
+                            "PATH should be the directory containing `python` and "
+                            "`hermes` (e.g. /opt/homebrew/Cellar/hermes-agent/2026.5.0/venv/bin)."
+                        ))
     args = parser.parse_args()
 
     banner()
-    track("installer_started")
+    _emit("installer_started")
 
     # 1. Detect Hermes ------------------------------------------------------
-    detected = detect_hermes()
-    if detected is None:
-        err("Could not locate Hermes venv. Looked at:")
-        err("  - PATH (`command -v hermes`)")
-        for path, label in HERMES_LAYOUTS:
-            err(f"  - {path} ({label})")
-        err("Install Hermes first, then re-run this script.")
-        track("installer_failed", {"stage": "detect_hermes", "error_class": "NotFound", "error_msg": "no hermes venv"})
-        return 1
-    venv_bin, layout = detected
-    ok(f"Hermes venv:  {C_CYN}{venv_bin}{C_RST}  {C_DIM}({layout}){C_RST}")
-    track("installer_hermes_detected", {"hermes_layout": layout, "hermes_path": venv_bin})
+    if args.hermes_bin:
+        venv_bin = args.hermes_bin.rstrip("/")
+        if not Path(f"{venv_bin}/python").exists():
+            err(f"--hermes-bin {venv_bin}: no `python` found there.")
+            err("Make sure the path is the directory containing `python` and `hermes`")
+            err("(e.g. /opt/homebrew/Cellar/hermes-agent/2026.5.0/venv/bin).")
+            _emit("installer_failed", {
+                "stage": "detect_hermes",
+                "error_class": "InvalidHermesBin",
+                "error_msg": f"no python at {venv_bin}/python",
+            })
+            return 1
+        layout = "user-override"
+        ok(f"Hermes venv:  {C_CYN}{venv_bin}{C_RST}  {C_DIM}(via --hermes-bin){C_RST}")
+    else:
+        detected = detect_hermes()
+        if detected is None:
+            err("Hey — we couldn't find where you installed Hermes.")
+            err("")
+            err("We looked here:")
+            err(f"  - PATH (`command -v hermes`)")
+            for path, label in HERMES_LAYOUTS:
+                err(f"  - {path} {C_DIM}({label}){C_RST}")
+            err("")
+            err("If Hermes is installed somewhere else, tell us where with")
+            err(f"{C_CYN}--hermes-bin{C_RST} (the directory that contains `python` and `hermes`).")
+            err("")
+            err("Examples:")
+            err(f"  {C_CYN}curl -fsSL https://raw.githubusercontent.com/chat4000/chat4000-hermes-plugin/stable/install.sh | bash -s -- --hermes-bin /opt/homebrew/Cellar/hermes-agent/2026.5.0/venv/bin{C_RST}")
+            err(f"  {C_CYN}curl -fsSL ... | bash -s -- --hermes-bin ~/.local/share/hermes/venv/bin{C_RST}")
+            err("")
+            err(f"Or run {C_CYN}install.sh --help{C_RST} for the full flag list.")
+            _emit("installer_failed", {"stage": "detect_hermes", "error_class": "NotFound", "error_msg": "no hermes venv"})
+            return 1
+        venv_bin, layout = detected
+        ok(f"Hermes venv:  {C_CYN}{venv_bin}{C_RST}  {C_DIM}({layout}){C_RST}")
+    _emit("installer_hermes_detected", {"hermes_layout": layout, "hermes_path": venv_bin})
     venv_python = f"{venv_bin}/python"
 
     # 2. Uninstall / reset modes --------------------------------------------
@@ -438,7 +526,7 @@ def main() -> int:
     try:
         if uv:
             ok(f"Using uv at {C_CYN}{uv}{C_RST}")
-            track("installer_uv_detected", {"uv_path": uv})
+            _emit("installer_uv_detected", {"uv_path": uv})
             install_via_uv(uv, venv_python, args.ref)
             installer_used = "uv"
         else:
@@ -447,7 +535,7 @@ def main() -> int:
             installer_used = "pip"
     except subprocess.CalledProcessError as exc:
         err(f"Install failed: {exc}")
-        track("installer_failed", {
+        _emit("installer_failed", {
             "stage": "pip_install", "error_class": type(exc).__name__,
             "error_msg": str(exc)[:200], "installer_used": uv and "uv" or "pip",
         })
@@ -462,7 +550,7 @@ def main() -> int:
     if check.returncode != 0:
         err("Plugin installed but import failed:")
         err(check.stderr.strip())
-        track("installer_failed", {"stage": "import_check", "error_msg": check.stderr.strip()[:200]})
+        _emit("installer_failed", {"stage": "import_check", "error_msg": check.stderr.strip()[:200]})
         return 1
 
     # Read installed plugin version for the event
@@ -472,7 +560,7 @@ def main() -> int:
     )
     plugin_version = ver.stdout.strip() if ver.returncode == 0 else "unknown"
     ok(f"Installed version: {C_GRN}{plugin_version}{C_RST}")
-    track("installer_pkg_installed", {
+    _emit("installer_pkg_installed", {
         "installer_used": installer_used,
         "plugin_ref": args.ref,
         "plugin_version": plugin_version,
@@ -485,7 +573,7 @@ def main() -> int:
         return 0
 
     hdr("🪄 Running install wizard")
-    track("installer_handing_off_to_wizard")
+    _emit("installer_handing_off_to_wizard")
     # exec so the wizard owns the real tty for Ctrl-C handling during pair.
     # NOTE: after execv the wizard takes over — any failures from here on
     # are reported by the wizard's own telemetry, not this installer.
@@ -493,7 +581,7 @@ def main() -> int:
         os.execv(f"{venv_bin}/chat4000", [f"{venv_bin}/chat4000", "wizard"])
     except OSError as exc:
         err(f"Could not exec wizard: {exc}")
-        track("installer_failed", {
+        _emit("installer_failed", {
             "stage": "wizard_exec",
             "error_class": type(exc).__name__,
             "error_msg": str(exc)[:200],
@@ -509,13 +597,13 @@ def _entry() -> int:
     except KeyboardInterrupt:
         print()
         warn("Install cancelled.")
-        track("installer_cancelled", {"stage": "uncaught"})
+        _emit("installer_cancelled", {"stage": "uncaught"})
         return 130
     except SystemExit:
         raise
     except BaseException as exc:
         err(f"Installer crashed unexpectedly: {type(exc).__name__}: {exc}")
-        track("installer_crashed", {
+        _emit("installer_crashed", {
             "error_class": type(exc).__name__,
             "error_msg": str(exc)[:200],
         })
