@@ -80,6 +80,19 @@ class StoredChat4000Key:
     path: Path
 
 
+def ensure_stored_group_key(account_id: str = "default") -> StoredChat4000Key:
+    """Load the per-account key file, minting one if it doesn't exist.
+
+    Called from the plugin's `register(ctx)` so the key is in place by the
+    time Hermes' gateway boot finishes — `chat4000 pair` then becomes a
+    pure pairing handshake with no side effects on local state."""
+    existing = load_stored_group_key(account_id)
+    if existing is not None:
+        return existing
+    from .crypto import generate_group_key
+    return save_stored_group_key(account_id, generate_group_key())
+
+
 def load_stored_group_key(account_id: str) -> Optional[StoredChat4000Key]:
     """Read the per-account key file. Returns None on missing / malformed /
     permission errors. Never raises — callers branch on configured state."""

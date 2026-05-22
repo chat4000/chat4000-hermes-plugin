@@ -337,14 +337,18 @@ async def _run_pair_command(
     pll = _normalize_log_level(pairing_log_level or acct.pairing_log_level)
     raw = (code or "").strip()
     code = _validate_user_supplied_code(raw) if raw else generate_pairing_code()
-    group_key_bytes = _ensure_local_key_for_account(acct)
 
-    # (Re)start the gateway in the background BEFORE blocking on iPhone
-    # scan. This is the side-effect that lets the install be just two
-    # commands (`pip install` + `chat4000 pair`) — pair handles enabling
-    # the plugin in config, minting the key, AND making sure the gateway
-    # picks both up. Without this, users still need a 3rd command.
-    _restart_hermes_gateway()
+    # The key is minted at plugin-load time (adapter.register), so by the
+    # time `pair` runs the file should already exist. If the user wiped
+    # state between gateway boot and `pair`, the account resolves with
+    # empty bytes — surface a clear error instead of silently re-minting,
+    # since a fresh key would orphan any already-paired devices.
+    if len(acct.group_key_bytes) != 32:
+        raise click.ClickException(
+            "No local chat4000 key found. (Re)start the Hermes gateway "
+            "to auto-mint one, then re-run `chat4000 pair`."
+        )
+    group_key_bytes = bytes(acct.group_key_bytes)
 
     click.echo(f"Pairing code: {code}")
     _render_qr_if_possible(f"chat4000://pair?code={code}")
