@@ -398,12 +398,6 @@ class Chat4000Adapter:  # subclass of BasePlatformAdapter, lazily resolved
             except Exception:
                 pass
 
-        # Track inbound — first message from app proves "everything works"
-        # end to end. Type-only, no content.
-        if is_from_app:
-            from . import analytics
-            analytics.track(f"message_received_{inner.t}", {})
-
         # Dispatch to the Hermes agent runner via BasePlatformAdapter.
         return asyncio.ensure_future(self._dispatch_to_agent(inner))
 
