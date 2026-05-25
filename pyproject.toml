@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chat4000-hermes-plugin"
-version = "1.0.0"
+version = "1.0.1"
 description = "chat4000 platform adapter for Hermes Agent — encrypted relay link to iOS/macOS/CLI apps"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }

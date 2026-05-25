@@ -295,9 +295,21 @@ def main() -> None:
     Used when Hermes doesn't expose ctx.register_cli (current v0.14.0) or
     when running outside Hermes' process entirely (devops scripts, App
     Store review pair-many, etc.). Wires up telemetry before dispatch."""
+    # Restore Unix-default SIGPIPE: if stdout is closed under us (SSH
+    # drop, `| head`, terminal gone), exit silently like every other CLI
+    # instead of raising BrokenPipeError up through Click and shipping
+    # a fake-bug Sentry event. POSIX-only; Windows has no SIGPIPE so we
+    # also catch BrokenPipeError at the boundary below.
+    import signal
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
     initialize_chat4000_telemetry()
     cli = _build_chat4000_cli()
-    cli(prog_name="chat4000")
+    try:
+        cli(prog_name="chat4000")
+    except BrokenPipeError:
+        sys.exit(0)
 
 
 # ─── Command implementations (async-capable to share pairing logic) ───────
