@@ -32,7 +32,6 @@ from .package_info import read_package_version
 PACKAGE_VERSION = read_package_version()
 CONFIG_DIR = Path.home() / ".config" / "chat4000"
 INSTALL_ID_PATH = CONFIG_DIR / "install-id"
-NOTICE_SHOWN_PATH = CONFIG_DIR / "notice-shown"
 TELEMETRY_ENABLED_PATH = CONFIG_DIR / "telemetry-enabled"
 
 
@@ -106,7 +105,6 @@ def initialize_chat4000_telemetry() -> None:
     status = get_telemetry_status()
     if not status["enabled"]:
         return
-    _maybe_print_first_run_notice()
     if not _SENTRY_DSN:
         return
 
@@ -177,34 +175,6 @@ def _resolve_install_id() -> str:
         return new_id
     except Exception:
         return str(uuid.uuid4())
-
-
-def _maybe_print_first_run_notice() -> None:
-    try:
-        if NOTICE_SHOWN_PATH.exists():
-            return
-        sys.stderr.write(
-            "\n".join(
-                [
-                    f"chat4000-hermes-plugin v{PACKAGE_VERSION}",
-                    "",
-                    "Anonymous error reports help us fix bugs faster. We collect crash data",
-                    "and error traces -- never message content, prompts, command arguments,",
-                    "or environment variables.",
-                    "",
-                    "To opt out:",
-                    "  hermes chat4000 telemetry disable",
-                    "  or set CHAT4000_TELEMETRY_DISABLED=1",
-                    "",
-                    "Privacy policy: https://chat4000.com/privacy",
-                    "",
-                ]
-            )
-        )
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        NOTICE_SHOWN_PATH.write_text("", encoding="utf-8")
-    except Exception:
-        pass
 
 
 _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
