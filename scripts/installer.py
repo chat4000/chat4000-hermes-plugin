@@ -536,11 +536,18 @@ def main() -> int:
     parser.add_argument("--reset", action="store_true",
                         help="wipe local key + ack store (destructive)")
     parser.add_argument("--ref", default=DEFAULT_REF,
-                        help=f"git ref to install (default: {DEFAULT_REF})")
+                        help=(
+                            "git ref to install — a branch, tag, or commit SHA "
+                            f"(default: {DEFAULT_REF}). Use a commit SHA to test "
+                            "an unreleased build before tagging stable."
+                        ))
     parser.add_argument("--verbose", action="store_true",
                         help="echo every subprocess command")
     parser.add_argument("--no-telemetry", action="store_true",
                         help="disable PostHog + Sentry for this run")
+    parser.add_argument("--stage", action="store_true",
+                        help="pair against the chat4000 stage servers "
+                             "(sets CHAT4000_ENV=stage; inherited by the wizard/pair)")
     parser.add_argument("--hermes-bin", default=None,
                         metavar="PATH",
                         help=(
@@ -551,7 +558,14 @@ def main() -> int:
     args = parser.parse_args()
 
     banner()
-    _emit("installer_started")
+
+    # Stage selection — propagates to `chat4000 wizard`/`pair` via the env, so
+    # the registrar (and therefore the gateway creds) point at stage.
+    if args.stage:
+        os.environ["CHAT4000_ENV"] = "stage"
+        say("Stage mode: onboarding/pairing will use the stage servers.")
+
+    _emit("installer_started", {"env": os.environ.get("CHAT4000_ENV", "production")})
 
     # 1. Detect Hermes ------------------------------------------------------
     venv_bin = None

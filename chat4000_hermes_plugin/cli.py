@@ -34,13 +34,31 @@ from .telemetry import (
 )
 
 APP_ID = "@chat4000/hermes-plugin"
-DEFAULT_REGISTRAR_URL = "https://registrar.chat4000.com"
+
+# Per-environment registrar. The registrar you pair against decides everything:
+# the stage registrar mints stage creds whose gateway_url points at the stage
+# gateway, so the running plugin follows automatically (it just uses the stored
+# creds). Select with `chat4000 pair --stage` or CHAT4000_ENV=stage.
+REGISTRAR_URLS = {
+    "production": "https://registrar.chat4000.com",
+    "stage": "https://registrar.stgcht4.duckdns.org",
+}
+
+
+def _resolve_env() -> str:
+    env = os.environ.get("CHAT4000_ENV", "").strip().lower()
+    return env if env in REGISTRAR_URLS else "production"
+
+
+def _resolve_registrar_url() -> str:
+    # An explicit URL override wins (self-hosted / custom); else by environment.
+    explicit = os.environ.get("CHAT4000_REGISTRAR_URL", "").strip()
+    return explicit or REGISTRAR_URLS[_resolve_env()]
 
 
 def _registrar() -> RegistrarClient:
-    url = os.environ.get("CHAT4000_REGISTRAR_URL", "").strip() or DEFAULT_REGISTRAR_URL
     token = os.environ.get("CHAT4000_SERVICE_TOKEN", "").strip() or None
-    return RegistrarClient(url, token)
+    return RegistrarClient(_resolve_registrar_url(), token)
 
 
 def _gen_code() -> str:
@@ -61,8 +79,12 @@ def _build_chat4000_cli():
 
     @chat4000.command("pair")
     @click.option("--account", default="default", help="Account id")
-    def cmd_pair(account):
+    @click.option("--stage", is_flag=True, default=False,
+                  help="Pair against the stage servers (stgcht4.duckdns.org).")
+    def cmd_pair(account, stage):
         """Onboard (first run) and pair a device with a 6-digit code."""
+        if stage:
+            os.environ["CHAT4000_ENV"] = "stage"
         try:
             asyncio.run(_run_pair(account))
         except KeyboardInterrupt:
@@ -82,6 +104,7 @@ def _build_chat4000_cli():
             return
         _c.echo("\n".join([
             f"account:     {account}",
+            f"environment: {_resolve_env()}",
             f"bot user:    {creds.user_id}",
             f"device:      {creds.device_id}",
             f"gateway:     {creds.gateway_url}",
@@ -159,6 +182,7 @@ async def _run_pair(account: str) -> None:
 
     version = read_package_version()
     reg = _registrar()
+    click.echo(f"Environment: {_resolve_env()}  (registrar: {_resolve_registrar_url()})")
 
     # Version gate (C.5) — refuse on force_upgrade, report to the operator.
     try:

@@ -9,12 +9,25 @@
 #   curl -fsSL https://raw.githubusercontent.com/chat4000/chat4000-hermes-plugin/stable/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/chat4000/chat4000-hermes-plugin/stable/install.sh | bash -s -- --no-wizard
 #
+# Testing an unreleased commit (before tagging `stable`): set CHAT4000_INSTALL_REF
+# to a branch/tag/commit SHA. install.sh then fetches installer.py from THAT ref
+# AND installs the plugin from it (so a changed installer.py is exercised too):
+#   curl -fsSL https://raw.githubusercontent.com/chat4000/chat4000-hermes-plugin/<SHA>/install.sh \
+#     | CHAT4000_INSTALL_REF=<SHA> bash
+# An explicit `--ref` flag still overrides the install ref.
+#
+# Stage servers: pass `--stage` (or set CHAT4000_ENV=stage, inherited by the
+# installer + wizard) to onboard/pair against the stage registrar + gateway:
+#   curl -fsSL .../<SHA>/install.sh | CHAT4000_INSTALL_REF=<SHA> bash -s -- --stage
+#
 # All flags pass through to installer.py. See `bash install.sh --help`
 # (after fetching) for the full list.
 
 set -euo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/chat4000/chat4000-hermes-plugin/stable"
+# Ref to install from: a branch, tag, or commit SHA. Defaults to the stable tag.
+REF="${CHAT4000_INSTALL_REF:-stable}"
+REPO_RAW="https://raw.githubusercontent.com/chat4000/chat4000-hermes-plugin/${REF}"
 
 # Find a usable Python interpreter (≥ 3.8).
 find_python() {
@@ -40,4 +53,10 @@ fi
 TMP="$(mktemp -t chat4000-installer.XXXXXX.py)"
 trap 'rm -f "$TMP"' EXIT
 curl -fsSL "$REPO_RAW/scripts/installer.py" -o "$TMP"
-exec "$PY" "$TMP" "$@"
+
+# Pass the same ref to installer.py so the pip install matches the installer we
+# just fetched — unless the caller passed their own --ref (then theirs wins).
+case " $* " in
+  *" --ref "*) exec "$PY" "$TMP" "$@" ;;
+  *)           exec "$PY" "$TMP" --ref "$REF" "$@" ;;
+esac
