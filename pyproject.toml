@@ -4,17 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chat4000-hermes-plugin"
-version = "1.0.1"
-description = "chat4000 platform adapter for Hermes Agent — encrypted relay link to iOS/macOS/CLI apps"
+version = "1.1.0"
+description = "chat4000 platform adapter for Hermes Agent — Matrix E2EE link to iOS/macOS/CLI apps"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11"
 authors = [{ name = "NeonNode Ltd", email = "contact@chat4000.com" }]
 
 dependencies = [
+  # v2 (Matrix) transport: the gateway WS client.
   "websockets>=12.0",
-  "pynacl>=1.5.0",
+  # `cryptography` powers AES-256-CTR encrypted media attachments (matrix/media.py)
+  # and is also used by the retained v1 crypto module.
   "cryptography>=42.0",
+  # `pynacl` is used only by the retained (v1-anchor) crypto module; keep until
+  # crypto.py/protocol_types.py are removed.
+  "pynacl>=1.5.0",
   "sentry-sdk>=2.0",
   "qrcode>=7.4",
   # `click` is used by the standalone `chat4000` console script.
@@ -31,6 +36,11 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8.0", "pytest-asyncio>=0.23", "pytest-cov>=5.0"]
+# The Matrix E2EE engine — a maturin/PyO3 wheel built from the sibling
+# `chat4000-pyvodozemac` repo. NOT on a public index; install the built wheel
+# alongside the plugin. Imported lazily by matrix/crypto_driver.load_olm_machine,
+# so the plugin loads without it (connect() fails clearly until it's present).
+crypto = ["chat4000-pyvodozemac>=0.1.0"]
 
 [dependency-groups]
 # uv reads this for `uv sync`. Hermes installs the package via its own

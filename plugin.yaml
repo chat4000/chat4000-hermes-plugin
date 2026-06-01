@@ -1,12 +1,12 @@
 name: chat4000
 label: chat4000
 kind: platform
-version: 1.0.0
+version: 1.1.0
 description: >
-  Connect a chat4000 iOS/macOS app (or CLI) to your Hermes Agent via the
-  zero-knowledge chat4000 relay. End-to-end encrypted (XChaCha20-Poly1305
-  with a 32-byte group key). The relay never sees plaintext. Same wire
-  protocol and pairing model as the original OpenClaw plugin.
+  Connect a chat4000 iOS/macOS app (or CLI) to your Hermes Agent over Matrix
+  (chat4000 v2). End-to-end encrypted with Matrix-native Olm/Megolm via the
+  chat4000-pyvodozemac binding; the homeserver/gateway see ciphertext only.
+  Onboarding + pairing is a 6-digit OTP through the registrar.
 author: NeonNode Ltd
 license: GPL-3.0-or-later
 homepage: https://chat4000.com
