@@ -72,6 +72,13 @@ from typing import Optional
 
 REPO_URL = "https://github.com/chat4000/chat4000-hermes-plugin"
 DEFAULT_REF = "stable"
+# Prebuilt Matrix-E2EE binding wheels live on the chat4000-pyvodozemac GitHub
+# Release. pip auto-picks the right wheel per platform from here, so users never
+# need a Rust toolchain. The plugin declares chat4000-pyvodozemac as a hard dep;
+# --find-links is how pip resolves it (it's not on PyPI).
+PYVODOZEMAC_FIND_LINKS = (
+    "https://github.com/chat4000/chat4000-pyvodozemac/releases/expanded_assets/v0.1.0"
+)
 HERMES_LAYOUTS = [
     # Direct paths first — fastest path on the most common installs.
     # `${HOME}/...` and `/...` are expanded with Path(...).expanduser()
@@ -473,7 +480,9 @@ def detect_uv() -> Optional[str]:
 
 def install_via_uv(uv: str, venv_python: str, ref: str) -> None:
     subprocess.run(
-        [uv, "pip", "install", "--python", venv_python, f"git+{REPO_URL}@{ref}"],
+        [uv, "pip", "install", "--python", venv_python,
+         "--find-links", PYVODOZEMAC_FIND_LINKS,
+         f"git+{REPO_URL}@{ref}"],
         check=True,
     )
 
@@ -494,7 +503,9 @@ def install_via_pip(venv_python: str, ref: str) -> None:
                 bootstrap = resp.read()
             subprocess.run([venv_python], input=bootstrap, check=True)
     subprocess.run(
-        [venv_python, "-m", "pip", "install", "--upgrade", f"git+{REPO_URL}@{ref}"],
+        [venv_python, "-m", "pip", "install", "--upgrade",
+         "--find-links", PYVODOZEMAC_FIND_LINKS,
+         f"git+{REPO_URL}@{ref}"],
         check=True,
     )
 
