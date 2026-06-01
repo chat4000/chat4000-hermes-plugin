@@ -37,6 +37,12 @@ plan in `../chat4000-pyvodozemac/PLAN.md`.
 - `matrix/hermes_adapter.py` — capstone: BasePlatformAdapter over MatrixSession;
   inbound → `handle_message`, replies → TurnWriter streaming/tools, typing →
   status. (Hermes-runtime-coupled; not unit-tested offline.)
+- `matrix/media.py` — encrypted attachments (D.3): AES-256-CTR encrypt/decrypt +
+  HTTP upload/download on the gateway-host media path. Inbound `m.image`/`m.audio`
+  wired into the adapter (download→decrypt→cache→vision/STT). **Tested (round-trip
+  + tamper rejection).**
+- `plugin_hooks.py` — reworked for v2: pre/post_tool_call → adapter
+  `external_tool_*` → `chat4000.tool` events + orphan sweep. **Tested.**
 
 ## Done (entry + pairing wired)
 
@@ -53,8 +59,6 @@ plan in `../chat4000-pyvodozemac/PLAN.md`.
 
 - `plugin_hooks.py` — if Hermes' standard runner doesn't fire the reply-pipeline
   tool hooks, route `pre/post_tool_call` to the adapter's TurnWriter (tool bubbles).
-- Media (P6): download+decrypt inbound `m.image`/`m.audio` over the HTTP media
-  path (D.3) for vision/STT; outbound media.
 - Delete the v1 modules (below) + their tests; add `chat4000-pyvodozemac` to deps.
 - Build the `chat4000-pyvodozemac` wheel (first networked `cargo build`).
 

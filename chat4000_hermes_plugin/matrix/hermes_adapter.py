@@ -66,6 +66,7 @@ class Chat4000MatrixAdapter:
         self._tools: dict[str, tuple[str, dict]] = {}
         self._active_room: Optional[str] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._media = None  # MediaClient, built at connect
         self._connected = False
 
         # Make this adapter discoverable by plugin_hooks (tool bubbles).
@@ -97,6 +98,9 @@ class Chat4000MatrixAdapter:
             on_command=self._on_command,
         )
         self._commands = CommandHandler(self._session, version=read_package_version())
+
+        from .media import MediaClient, media_base_from_gateway
+        self._media = MediaClient(media_base_from_gateway(creds.gateway_url), creds.access_token)
 
         try:
             await self._session.start()
@@ -141,15 +145,44 @@ class Chat4000MatrixAdapter:
 
         msgtype = content.get("msgtype")
         text = content.get("body", "") if msgtype == "m.text" else ""
+        message_type = MessageType.TEXT
+        media_urls: list[str] = []
+        media_types: list[str] = []
+
+        # Encrypted attachments (D.3): the `file` object is cleartext now that the
+        # event is decrypted — download the ciphertext, decrypt, cache for Hermes'
+        # vision/STT tools (path passed via media_urls, same as Telegram/WhatsApp).
+        if msgtype in ("m.image", "m.audio", "m.video", "m.file") and self._media is not None:
+            file_meta = content.get("file")
+            if file_meta:
+                try:
+                    raw = await self._media.download_attachment(file_meta)
+                    mime = (content.get("info") or {}).get("mimetype") or "application/octet-stream"
+                    ext = "." + (mime.rsplit("/", 1)[-1] or "bin").split(";")[0].strip()
+                    from gateway.platforms.base import (  # type: ignore[import-not-found]
+                        cache_audio_from_bytes,
+                        cache_image_from_bytes,
+                    )
+                    if msgtype == "m.image":
+                        media_urls.append(cache_image_from_bytes(raw, ext=".jpg" if ext == ".jpeg" else ext))
+                        message_type = MessageType.IMAGE
+                    elif msgtype == "m.audio":
+                        media_urls.append(cache_audio_from_bytes(raw, ext=ext))
+                        message_type = MessageType.AUDIO
+                    media_types.append(mime)
+                    text = content.get("body", "") if msgtype not in ("m.image", "m.audio") else ""
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("chat4000: inbound media decrypt failed: %s", exc)
+
         source = self.build_source(chat_id=room_id, user_id=sender, chat_type="dm")
         event = MessageEvent(
             text=text,
-            message_type=MessageType.TEXT,  # media → P6
+            message_type=message_type,
             source=source,
             raw_message=content,
             message_id=uuid.uuid4().hex,
-            media_urls=[],
-            media_types=[],
+            media_urls=media_urls,
+            media_types=media_types,
         )
         self._active_room = room_id
         try:
