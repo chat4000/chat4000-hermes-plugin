@@ -34,10 +34,6 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_STATE_DIR", str(tmp_path / ".hermes"))
     # Telemetry config also lives under $HOME.
     monkeypatch.setenv("CHAT4000_TELEMETRY_DISABLED", "1")
-    # Clear the ack-store cache between tests so each test gets fresh DBs.
-    from chat4000_hermes_plugin.ack_store import _reset_ack_store_cache_for_tests
-
-    _reset_ack_store_cache_for_tests()
     # Clear cached device identity so each test gets a fresh UUID.
     import chat4000_hermes_plugin.key_store as ks
 
