@@ -317,7 +317,10 @@ def _handle_cli_error(exc: BaseException) -> None:
 
     if isinstance(exc, RegistrarError):
         from . import analytics
-        analytics.track("pairing_failed", {"reason": exc.errcode, "status": exc.status})
+        analytics.track(
+            "pairing_failed",
+            {"reason": exc.errcode, "status": exc.status, "env": _resolve_env()},
+        )
         analytics.flush()
         click.echo(f"Pairing failed: {exc}", err=True)
         if exc.status in (0, 502, 503, 504):
