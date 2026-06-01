@@ -168,6 +168,25 @@ def wait_for_supervisor_restart(seconds: float = 2.0) -> bool:
     return False
 
 
+# How long to let Telegram release the old gateway's getUpdates long-poll before
+# starting the new one. Telegram allows ONE poller per bot token; without this
+# grace the new gateway briefly double-polls the same bot and Telegram logs
+# "polling conflict (terminated by other getUpdates request)". Tunable via
+# CHAT4000_TELEGRAM_RELEASE_SECS for fleets that don't run Telegram.
+TELEGRAM_RELEASE_SECS = float(os.environ.get("CHAT4000_TELEGRAM_RELEASE_SECS", "6") or 6)
+
+
+def _wait_until_gateway_gone(timeout: float = 10.0) -> None:
+    """Poll until no `hermes gateway run` process remains (re-killing stragglers),
+    up to `timeout`. Guarantees the old gateway can't overlap the new one."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not gw_is_running():
+            return
+        subprocess.run(["pkill", "-9", "-f", "hermes gateway run"], capture_output=True)
+        time.sleep(0.3)
+
+
 def step_gateway() -> int:
     """Step 2: (re)start the Hermes gateway. Returns process exit code."""
     rule(f"{ICO_ROCKET}  Bring the gateway online", 2, 2)
@@ -190,6 +209,16 @@ def step_gateway() -> int:
             tail_log_panel()
             return 0
         console.print(f"[yellow]{ICO_INFO}  No supervisor detected — starting manually.[/yellow]")
+        # Clean restart: make sure the old gateway is fully gone, then let
+        # Telegram release its getUpdates poll, so the new gateway never
+        # double-polls the bot (no "Telegram polling conflict").
+        _wait_until_gateway_gone(timeout=10.0)
+        if TELEGRAM_RELEASE_SECS > 0:
+            console.print(
+                f"[dim]{ICO_WAIT}  Letting Telegram release the old poll "
+                f"({TELEGRAM_RELEASE_SECS:.0f}s) to avoid a polling conflict…[/dim]"
+            )
+            time.sleep(TELEGRAM_RELEASE_SECS)
     else:
         console.print(f"[cyan]{ICO_INFO}  Gateway not currently running.[/cyan]")
 
