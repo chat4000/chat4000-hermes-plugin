@@ -277,7 +277,16 @@ def tail_log_panel(log_path: str = "/tmp/gateway.log", n: int = 12) -> None:
     ))
 
 
-def success_panel() -> None:
+def _resolve_chat4000_cmd(venv_bin: str = "") -> str:
+    """The actual command to run `chat4000` with. The console script lives in
+    Hermes' venv bin, which usually ISN'T on the user's PATH — so prefer the
+    full path. Falls back to whatever's on PATH, else bare `chat4000`."""
+    if venv_bin and Path(f"{venv_bin}/chat4000").exists():
+        return f"{venv_bin}/chat4000"
+    return shutil.which("chat4000") or "chat4000"
+
+
+def success_panel(chat4000_cmd: str = "chat4000") -> None:
     console.print()
     console.print(
         Panel.fit(
@@ -287,10 +296,11 @@ def success_panel() -> None:
                 ("\n\n", ""),
                 ("Send a message from the chat4000 app — your Hermes agent will reply.", ""),
                 ("\n\n", ""),
-                ("Useful commands:\n", "bold"),
-                ("  chat4000 status", "cyan"),
-                ("    show config, key location, group id\n", "dim"),
-                ("  chat4000 pair", "cyan"),
+                ("Useful commands ", "bold"),
+                ("(it's a standalone command, not `hermes chat4000`):\n", "dim"),
+                (f"  {chat4000_cmd} status", "cyan"),
+                ("    show config + paired users\n", "dim"),
+                (f"  {chat4000_cmd} pair", "cyan"),
                 ("      pair another device\n", "dim"),
                 ("  tail -f /tmp/gateway.log", "cyan"),
                 ("    follow gateway logs", "dim"),
@@ -322,7 +332,7 @@ def main() -> int:
     if rc != 0:
         return rc
 
-    success_panel()
+    success_panel(_resolve_chat4000_cmd(env.get("venv_bin", "")))
     return 0
 
 
