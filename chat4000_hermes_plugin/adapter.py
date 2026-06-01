@@ -63,10 +63,15 @@ def _make_adapter_class():
 def register(ctx) -> None:
     """Plugin entry point — Hermes' loader calls this once on discovery."""
     from . import analytics
+    from .plugin_hooks import register_plugin_hooks
     from .telemetry import initialize_chat4000_telemetry
 
     initialize_chat4000_telemetry()
     analytics.initialize_chat4000_analytics()
+
+    # Tool bubbles: route Hermes' pre/post_tool_call to the active adapter's
+    # external_tool_* (chat4000.tool events). Self-filters by session.
+    register_plugin_hooks(ctx)
     analytics.set_person_properties({
         "plugin_version": analytics.PACKAGE_VERSION,
         "os_platform": __import__("sys").platform,
@@ -97,11 +102,6 @@ def register(ctx) -> None:
         ),
         emoji="🔐",
     )
-
-    # NOTE (TODO P4): tool bubbles. Hermes' standard runner may not fire the
-    # reply-pipeline tool hooks; if so, `plugin_hooks` must be reworked to route
-    # pre/post_tool_call → the active adapter's TurnWriter. Text streaming + status
-    # already flow via reply_pipeline_options.
 
     if hasattr(ctx, "register_cli"):
         from .cli import register_chat4000_cli
