@@ -278,12 +278,14 @@ def tail_log_panel(log_path: str = "/tmp/gateway.log", n: int = 12) -> None:
 
 
 def _resolve_chat4000_cmd(venv_bin: str = "") -> str:
-    """The actual command to run `chat4000` with. The console script lives in
-    Hermes' venv bin, which usually ISN'T on the user's PATH — so prefer the
-    full path. Falls back to whatever's on PATH, else bare `chat4000`."""
+    """The command to show for running `chat4000`. If it's on PATH (e.g. the
+    installer symlinked it into /usr/local/bin), show bare `chat4000`. Otherwise
+    fall back to the full venv-bin path so the command still works."""
+    if shutil.which("chat4000"):
+        return "chat4000"
     if venv_bin and Path(f"{venv_bin}/chat4000").exists():
         return f"{venv_bin}/chat4000"
-    return shutil.which("chat4000") or "chat4000"
+    return "chat4000"
 
 
 def success_panel(chat4000_cmd: str = "chat4000") -> None:

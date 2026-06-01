@@ -533,6 +533,34 @@ def reset_local_state() -> None:
         _sh.rmtree(state_dir, ignore_errors=True)
         ok(f"Removed {state_dir}")
 
+
+def symlink_chat4000_onto_path(venv_bin: str) -> None:
+    """Make `chat4000` runnable without the full venv path. The console script
+    lives in Hermes' venv bin (not on PATH), so symlink it into a PATH dir:
+    /usr/local/bin (root/most installs), else ~/.local/bin. Best-effort."""
+    src = Path(venv_bin) / "chat4000"
+    if not src.exists():
+        return
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    for d in (Path("/usr/local/bin"), Path.home() / ".local" / "bin"):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            if not os.access(d, os.W_OK):
+                continue
+            link = d / "chat4000"
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            link.symlink_to(src)
+            ok(f"Linked {C_CYN}chat4000{C_RST} -> {link}  "
+               f"{C_DIM}(run `chat4000 status` from anywhere){C_RST}")
+            if str(d) not in path_dirs:
+                warn(f"{d} isn't on your PATH — add it, or use {link} directly.")
+            return
+        except OSError:
+            continue
+    warn(f"Couldn't symlink chat4000 onto PATH; run it via {src}")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -720,6 +748,10 @@ def main() -> int:
         "plugin_ref": args.ref,
         "plugin_version": plugin_version,
     })
+
+    # Make `chat4000` runnable from anywhere (symlink into a PATH dir) so users
+    # don't need the full venv path.
+    symlink_chat4000_onto_path(venv_bin)
 
     # 4. Wizard handoff -----------------------------------------------------
     if args.no_wizard:
