@@ -63,3 +63,29 @@ def install_plugin_log_handler() -> Path:
 
 def resolve_log_path() -> Path:
     return resolve_chat4000_plugin_dir() / "logs" / "chat4000.log"
+
+
+def suppress_telegram_polling_conflict() -> None:
+    """Drop ONLY the transient Telegram 'polling conflict (terminated by other
+    getUpdates request)' warning from Hermes' telegram platform logger.
+
+    It appears for a few seconds after a gateway restart (the old getUpdates
+    poll hasn't been released yet) and then self-heals — pure noise that hurts
+    UX. We attach a filter that drops just that message; every other Telegram
+    log line is kept. Opt out with CHAT4000_SUPPRESS_TELEGRAM_CONFLICT=0."""
+    import os
+
+    if os.environ.get("CHAT4000_SUPPRESS_TELEGRAM_CONFLICT", "1").strip().lower() in (
+        "0", "false", "no",
+    ):
+        return
+
+    class _ConflictFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+            try:
+                msg = record.getMessage()
+            except Exception:
+                return True
+            return not ("polling conflict" in msg or "terminated by other getUpdates" in msg)
+
+    logging.getLogger("gateway.platforms.telegram").addFilter(_ConflictFilter())

@@ -69,6 +69,11 @@ def register(ctx) -> None:
     initialize_chat4000_telemetry()
     analytics.initialize_chat4000_analytics()
 
+    # Hide the transient Telegram "polling conflict" warning a gateway restart
+    # triggers (self-heals in seconds) — better UX than making users wait it out.
+    from .logging_setup import suppress_telegram_polling_conflict
+    suppress_telegram_polling_conflict()
+
     # Tool bubbles: route Hermes' pre/post_tool_call to the active adapter's
     # external_tool_* (chat4000.tool events). Self-filters by session.
     register_plugin_hooks(ctx)

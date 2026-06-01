@@ -168,12 +168,13 @@ def wait_for_supervisor_restart(seconds: float = 2.0) -> bool:
     return False
 
 
-# How long to let Telegram release the old gateway's getUpdates long-poll before
-# starting the new one. Telegram allows ONE poller per bot token; without this
-# grace the new gateway briefly double-polls the same bot and Telegram logs
-# "polling conflict (terminated by other getUpdates request)". Tunable via
-# CHAT4000_TELEGRAM_RELEASE_SECS for fleets that don't run Telegram.
-TELEGRAM_RELEASE_SECS = float(os.environ.get("CHAT4000_TELEGRAM_RELEASE_SECS", "6") or 6)
+# Optional grace for Telegram to release the old gateway's getUpdates long-poll
+# before starting the new one. DEFAULT 0 — we don't make users wait. The brief
+# "polling conflict" Telegram logs during the overlap is transient (self-heals in
+# a few seconds) and is SUPPRESSED from the display + gateway log instead (see
+# logging_setup.suppress_telegram_polling_conflict). Set
+# CHAT4000_TELEGRAM_RELEASE_SECS=6 to wait instead of suppress.
+TELEGRAM_RELEASE_SECS = float(os.environ.get("CHAT4000_TELEGRAM_RELEASE_SECS", "0") or 0)
 
 
 def _wait_until_gateway_gone(timeout: float = 10.0) -> None:
@@ -260,7 +261,9 @@ def tail_log_panel(log_path: str = "/tmp/gateway.log", n: int = 12) -> None:
     if not p.exists():
         return
     try:
-        lines = p.read_text(errors="replace").splitlines()[-n:]
+        all_lines = p.read_text(errors="replace").splitlines()
+        # Hide the transient Telegram restart noise — keep every other line.
+        lines = [ln for ln in all_lines if "polling conflict" not in ln][-n:]
     except Exception:
         return
     if not lines:
