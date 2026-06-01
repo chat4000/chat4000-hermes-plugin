@@ -85,9 +85,12 @@ class Chat4000MatrixAdapter:
         except RuntimeError:
             self._loop = None
 
+        from .. import analytics
+
         creds = load_bot_creds(self._account_id)
         if creds is None:
             logger.error("chat4000 v2: no bot creds — run `chat4000 pair` to onboard")
+            analytics.track("gateway_connect_failed", {"reason": "no_creds"})
             return False
 
         self._session = MatrixSession(
@@ -113,10 +116,10 @@ class Chat4000MatrixAdapter:
                     await self._session.invite_user(uid)
         except Exception as exc:  # noqa: BLE001
             logger.error("chat4000 v2 connect failed: %s", exc)
+            analytics.track("gateway_connect_failed", {"reason": type(exc).__name__})
             return False
 
         self._connected = True
-        from .. import analytics
         analytics.track("gateway_started", {"transport": "matrix"})
         return True
 

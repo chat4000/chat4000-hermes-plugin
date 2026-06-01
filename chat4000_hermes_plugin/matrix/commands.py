@@ -99,6 +99,12 @@ class CommandHandler:
     # ─── reply ────────────────────────────────────────────────────────────
 
     async def _reply(self, command: str, fields: dict) -> None:
+        # Coarse, content-free: which command ran and whether it succeeded.
+        try:
+            from .. import analytics
+            analytics.track("command_handled", {"command": command, "ok": fields.get("ok")})
+        except Exception:
+            pass
         control = self._s.rooms.control_room_id
         if control is None:
             logger.warning("no control room; cannot reply to %s", command)

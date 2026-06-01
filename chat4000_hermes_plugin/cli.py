@@ -163,12 +163,16 @@ def register_chat4000_cli(ctx) -> None:
 
 
 def main() -> None:
+    import atexit
     import signal
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     initialize_chat4000_telemetry()
     from . import analytics
     analytics.initialize_chat4000_analytics()
+    # CLI commands are short-lived — flush on ANY exit path (incl. sys.exit) so
+    # every tracked event actually lands before the process dies.
+    atexit.register(analytics.flush)
     cli = _build_chat4000_cli()
     try:
         cli(prog_name="chat4000")
@@ -182,19 +186,28 @@ def main() -> None:
 async def _run_pair(account: str) -> None:
     import click  # type: ignore[import-not-found]
 
+    from . import analytics
+
     version = read_package_version()
     reg = _registrar()
-    click.echo(f"Environment: {_resolve_env()}  (registrar: {_resolve_registrar_url()})")
+    env = _resolve_env()
+    click.echo(f"Environment: {env}  (registrar: {_resolve_registrar_url()})")
+
+    first_run = load_bot_creds(account) is None
+    analytics.track("pairing_started", {"env": env, "first_run": first_run})
 
     # Version gate (C.5) — refuse on force_upgrade, report to the operator.
     try:
         verdict = await reg.version(APP_ID, version, "production")
         if verdict.action == "force_upgrade":
+            analytics.track("version_force_upgrade", {"client_version": version, "recommended": verdict.recommended})
             click.echo(f"Update required (>= {verdict.recommended}). Aborting.", err=True)
             sys.exit(2)
         if verdict.action == "recommend_upgrade":
+            analytics.track("version_recommend_upgrade", {"client_version": version, "recommended": verdict.recommended})
             click.echo(f"Note: a newer version is recommended ({verdict.recommended}).")
     except RegistrarError as exc:
+        analytics.track("version_check_failed", {"reason": exc.errcode, "status": exc.status})
         click.echo(f"(version check skipped: {exc})")
 
     # Self-onboard the bot identity on first run.
@@ -208,12 +221,14 @@ async def _run_pair(account: str) -> None:
         onboard_code = _gen_code()
         creds = await reg.self_onboard(onboard_code, device_name="hermes-plugin")
         save_bot_creds(creds, account)
+        analytics.track("plugin_onboarded", {"env": env})
         click.echo(f"Onboarded plugin identity: {creds.user_id}")
         click.echo(f"Bot creds saved (gateway: {creds.gateway_url}).")
 
     # Register a user pairing code.
     code = _gen_code()
     await reg.register(code, kind="user", plugin_id=creds.plugin_id)
+    analytics.track("pairing_code_registered", {"env": env})
     click.echo("")
     click.echo(f"  Pairing code:  {code[:3]} {code[3:]}")
     _render_qr_if_possible(f"chat4000://pair?code={code}")
@@ -222,10 +237,14 @@ async def _run_pair(account: str) -> None:
 
     user_id = await reg.poll_until_complete(code)
     if user_id is None:
+        analytics.track("pairing_expired", {"env": env})
+        analytics.flush()
         click.echo("Pairing code expired without a device redeeming it. Try again.")
         return
 
     add_known_user(user_id, account)
+    analytics.track("pairing_completed", {"env": env, "first_run": first_run})
+    analytics.flush()
     click.echo("")
     click.echo(f"✓ Paired {user_id}.")
     click.echo("The running gateway will invite them + share keys on its next start.")
@@ -255,6 +274,9 @@ def _run_reset(account: str) -> None:
                 removed.append(str(p))
             except OSError:
                 pass
+    from . import analytics
+    analytics.track("reset_performed", {"removed_count": len(removed)})
+    analytics.flush()
     if not removed:
         click.echo(f'No chat4000 state for account "{account}".')
         return
