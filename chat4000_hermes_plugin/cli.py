@@ -56,8 +56,16 @@ def _resolve_registrar_url() -> str:
     return explicit or REGISTRAR_URLS[_resolve_env()]
 
 
+# Static shared service token. It gates only pairing-code registration + status
+# polling (never content) — basic-auth-grade by design (pushback X2): it ships in
+# the client, so treat it as public. Baked in so installs need no token; override
+# with CHAT4000_SERVICE_TOKEN to rotate. Must match the registrar's
+# REGISTRAR_SERVICE_TOKEN.
+DEFAULT_SERVICE_TOKEN = "chat4000_svc_72ee3b80a16f826a173c65450cadd107d5f6912d4d96135a"
+
+
 def _registrar() -> RegistrarClient:
-    token = os.environ.get("CHAT4000_SERVICE_TOKEN", "").strip() or None
+    token = os.environ.get("CHAT4000_SERVICE_TOKEN", "").strip() or DEFAULT_SERVICE_TOKEN
     return RegistrarClient(_resolve_registrar_url(), token)
 
 
@@ -219,11 +227,7 @@ async def _run_pair(account: str) -> None:
     # Self-onboard the bot identity on first run.
     creds = load_bot_creds(account)
     if creds is None:
-        if not os.environ.get("CHAT4000_SERVICE_TOKEN", "").strip():
-            raise RuntimeError(
-                "CHAT4000_SERVICE_TOKEN is required to onboard (see pushback X2). "
-                "Set it in the plugin's environment."
-            )
+        # Uses the static DEFAULT_SERVICE_TOKEN unless CHAT4000_SERVICE_TOKEN is set.
         onboard_code = _gen_code()
         creds = await reg.self_onboard(onboard_code, device_name="hermes-plugin")
         save_bot_creds(creds, account)
