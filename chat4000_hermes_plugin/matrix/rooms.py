@@ -125,6 +125,32 @@ class RoomManager:
             {"order": 0.0},
         )
 
+    # ─── discovery (deterministic, from the homeserver) ───────────────────
+
+    async def discover(self) -> None:
+        """Find our existing space + control room by asking the homeserver, so a
+        gateway restart doesn't create DUPLICATE rooms. Lists the bot's joined
+        rooms and reads each one's `m.room.create` (is it the space?) and
+        `chat4000.room_kind` (is it the control room?)."""
+        status, body = await self.gateway.request("GET", "/_matrix/client/v3/joined_rooms")
+        if status >= 400:
+            logger.warning("discover: joined_rooms failed: %s", status)
+            return
+        for room_id in body.get("joined_rooms", []):
+            if self.space_id is None:
+                s, c = await self.gateway.request(
+                    "GET", f"/_matrix/client/v3/rooms/{room_id}/state/m.room.create/"
+                )
+                if s < 400 and (c or {}).get("type") == "m.space":
+                    self.space_id = room_id
+                    continue
+            if self.control_room_id is None:
+                s, k = await self.gateway.request(
+                    "GET", f"/_matrix/client/v3/rooms/{room_id}/state/{ROOM_KIND}/"
+                )
+                if s < 400 and (k or {}).get("kind") == "control":
+                    self.control_room_id = room_id
+
     # ─── discovery (from sync) ────────────────────────────────────────────
 
     def classify_room(self, room_id: str, required_state: list[dict]) -> Optional[str]:

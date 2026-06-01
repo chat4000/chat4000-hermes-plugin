@@ -99,6 +99,10 @@ class GatewayClient:
         self.device_id: Optional[str] = None
         self._run_task: Optional[asyncio.Task] = None
         self._authed = asyncio.Event()
+        # Sync frames are handled on a SEPARATE worker, never inline in the read
+        # loop — see _sync_worker_loop for why (deadlock avoidance).
+        self._sync_queue: asyncio.Queue = asyncio.Queue()
+        self._sync_worker: Optional[asyncio.Task] = None
 
     # ─── lifecycle ────────────────────────────────────────────────────────
 
@@ -179,11 +183,18 @@ class GatewayClient:
             self._creds.gateway_url, max_size=4 * 1024 * 1024, ping_interval=25, ping_timeout=15
         ) as ws:
             self._ws = ws
+            # Fresh sync queue + worker per connection (drop any stale frames
+            # from a previous socket).
+            self._sync_queue = asyncio.Queue()
+            self._sync_worker = asyncio.ensure_future(self._sync_worker_loop())
             await self._send_auth(self._creds.access_token)
             try:
                 async for raw in ws:
                     await self._dispatch(raw)
             finally:
+                if self._sync_worker is not None:
+                    self._sync_worker.cancel()
+                    self._sync_worker = None
                 self._ws = None
                 self._fail_pending(ConnectionError("socket closed"))
                 # Resume sync from our last persisted pos on the next connect.
@@ -245,9 +256,25 @@ class GatewayClient:
             return
 
         if t == "sync":
-            # Top-level pos/rooms/extensions (protocol.rs `sync_frame`).
-            await self._on_sync(frame)
+            # Hand off to the worker — do NOT await on_sync here. on_sync makes its
+            # own requests (key upload/query, createRoom, …) and awaits their `resp`
+            # frames, which are read by THIS loop; awaiting on_sync inline would
+            # block the loop from ever reading those resps → deadlock (the 30s
+            # connect timeout). Enqueue and keep reading.
+            self._sync_queue.put_nowait(frame)
             return
+
+    async def _sync_worker_loop(self) -> None:
+        """Process sync frames serially, OFF the read loop, so the read loop stays
+        free to deliver the `resp` frames that on_sync's requests depend on."""
+        while True:
+            frame = await self._sync_queue.get()
+            try:
+                await self._on_sync(frame)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("sync handler error: %s", exc)
+            finally:
+                self._sync_queue.task_done()
 
     async def _send(self, frame: dict) -> None:
         ws = self._ws

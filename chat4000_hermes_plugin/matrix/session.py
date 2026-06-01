@@ -97,6 +97,8 @@ class MatrixSession:
         """Create the space + control room if we don't have them yet. Idempotent:
         once the first sync classifies an existing control room, this no-ops."""
         assert self.rooms is not None
+        # Find existing space/control room first so a restart doesn't duplicate them.
+        await self.rooms.discover()
         if self.rooms.space_id is None:
             await self.rooms.create_space()
         if self.rooms.control_room_id is None:
