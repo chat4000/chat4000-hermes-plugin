@@ -167,6 +167,8 @@ def main() -> None:
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     initialize_chat4000_telemetry()
+    from . import analytics
+    analytics.initialize_chat4000_analytics()
     cli = _build_chat4000_cli()
     try:
         cli(prog_name="chat4000")
@@ -285,9 +287,27 @@ def _render_qr_if_possible(payload: str) -> None:
 
 
 def _handle_cli_error(exc: BaseException) -> None:
+    """Report a CLI failure and exit NON-ZERO so callers (the wizard) know it
+    failed. Operational registrar errors (backend down, bad token, code in use)
+    are tracked to PostHog and printed cleanly — NOT captured as Sentry crashes;
+    only unexpected errors get a Sentry trace."""
     import click  # type: ignore[import-not-found]
-    from .error_log import dump_chat4000_trace
 
+    if isinstance(exc, RegistrarError):
+        from . import analytics
+        analytics.track("pairing_failed", {"reason": exc.errcode, "status": exc.status})
+        analytics.flush()
+        click.echo(f"Pairing failed: {exc}", err=True)
+        if exc.status in (0, 502, 503, 504):
+            click.echo(
+                "The registrar is down or unreachable — check the backend "
+                "(or stage deploy) and try again.",
+                err=True,
+            )
+        sys.exit(1)
+
+    from .error_log import dump_chat4000_trace
     log_path = dump_chat4000_trace("cli", exc)
     click.echo(f"chat4000 error: {exc}", err=True)
     click.echo(f"Trace log: {log_path}", err=True)
+    sys.exit(1)

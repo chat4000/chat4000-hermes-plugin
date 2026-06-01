@@ -174,6 +174,18 @@ class RegistrarClient:
                 payload = json.loads(raw)
             except Exception:
                 payload = {}
+            # Don't surface a raw HTML body (e.g. an nginx 502 page) as the error
+            # message — give a short, classified message instead.
+            errcode = payload.get("errcode") or (
+                "M_HOMESERVER_UNAVAILABLE" if e.code in (502, 503, 504) else "M_UNKNOWN"
+            )
+            error = payload.get("error") or (
+                f"registrar returned HTTP {e.code} with no JSON body "
+                "(the registrar service may be down or unreachable behind nginx)"
+            )
+            raise RegistrarError(e.code, errcode, error) from e
+        except urllib.error.URLError as e:
             raise RegistrarError(
-                e.code, payload.get("errcode", "M_UNKNOWN"), payload.get("error", raw)
+                0, "M_HOMESERVER_UNAVAILABLE",
+                f"could not reach the registrar at {self._base}: {e.reason}",
             ) from e
