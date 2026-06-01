@@ -193,6 +193,12 @@ async def _run_pair(account: str) -> None:
     env = _resolve_env()
     click.echo(f"Environment: {env}  (registrar: {_resolve_registrar_url()})")
 
+    # Pip-installed Hermes plugins are DISCOVERED via entry-points but only
+    # LOADED when listed in plugins.enabled. Without this, the gateway never
+    # loads chat4000 → never connects → no rooms. (v1 did this; the v2 rewrite
+    # dropped it — that's why room creation silently did nothing.)
+    _ensure_plugin_enabled_in_hermes_config()
+
     first_run = load_bot_creds(account) is None
     analytics.track("pairing_started", {"env": env, "first_run": first_run})
 
@@ -287,6 +293,49 @@ def _run_reset(account: str) -> None:
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _ensure_plugin_enabled_in_hermes_config() -> None:
+    """Add 'chat4000' to Hermes' plugins.enabled in config.yaml (idempotent).
+
+    Pip-installed plugins are discovered via the hermes_agent.plugins entry-point
+    but only activated when enabled here. Best-effort: if yaml/hermes_constants
+    aren't importable, no-op (operator can enable manually)."""
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except Exception:
+        return
+    # Resolve the Hermes home/config path (prefer hermes_constants, fall back to
+    # HERMES_HOME / ~/.hermes).
+    cfg_path = None
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+        cfg_path = get_hermes_home() / "config.yaml"
+    except Exception:
+        from pathlib import Path
+        home = os.environ.get("HERMES_HOME", "").strip()
+        cfg_path = (Path(home).expanduser() if home else Path.home() / ".hermes") / "config.yaml"
+    try:
+        import click  # type: ignore[import-not-found]
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        plugins = cfg.setdefault("plugins", {})
+        if not isinstance(plugins, dict):
+            plugins = {}
+            cfg["plugins"] = plugins
+        enabled = plugins.setdefault("enabled", [])
+        if not isinstance(enabled, list):
+            enabled = []
+            plugins["enabled"] = enabled
+        if "chat4000" in enabled:
+            return
+        enabled.append("chat4000")
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        click.echo(f"Enabled chat4000 in Hermes config: {cfg_path}")
+    except Exception:
+        pass
 
 
 def _render_qr_if_possible(payload: str) -> None:
