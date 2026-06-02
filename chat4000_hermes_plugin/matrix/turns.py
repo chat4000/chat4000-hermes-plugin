@@ -22,7 +22,6 @@ from __future__ import annotations
 from .crypto_driver import CryptoDriver
 from .gateway_client import GatewayClient
 
-TURN_REL = "chat4000.turn"
 TOOL_MSGTYPE = "chat4000.tool"
 STATUS_STATE = "chat4000.status"
 
@@ -80,13 +79,15 @@ class TurnWriter:
             "result": "",
             "duration_ms": 0,
         }
+        # The turn link is chat4000.turn_id INSIDE the encrypted content (protocol
+        # E / client contract) — NOT a cleartext m.relates_to. tool_end is the one
+        # that uses m.relates_to (an m.replace edit of this event).
         return await self._c.send_room_event(
             room_id,
             TOOL_MSGTYPE,
-            {"msgtype": TOOL_MSGTYPE, TOOL_MSGTYPE: tool},
+            {"msgtype": TOOL_MSGTYPE, TOOL_MSGTYPE: tool, "chat4000.turn_id": anchor_id},
             self._members,
             push=False,
-            relates_to={"rel_type": TURN_REL, "event_id": anchor_id},
         )
 
     async def tool_end(

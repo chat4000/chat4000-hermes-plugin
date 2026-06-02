@@ -83,6 +83,33 @@ async def test_non_chat4000_session_is_ignored():
         _clear()
 
 
+def test_schedule_async_from_worker_thread_runs_on_loop() -> None:
+    """Regression: pre/post_tool_call hooks fire on Hermes' executor thread (no
+    running loop there). _schedule_async must hand the coroutine to the gateway
+    loop via run_coroutine_threadsafe, NOT drop it with a cross-thread create_task.
+    On the old code the coroutine was silently closed -> zero chat4000.tool events."""
+    import threading
+
+    loop = asyncio.new_event_loop()
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    try:
+        ran = threading.Event()
+
+        class _A:
+            _loop = loop
+
+        async def _coro() -> None:
+            ran.set()
+
+        h._schedule_async(_A(), _coro())  # called from a non-loop thread
+        assert ran.wait(2.0), "coroutine was dropped instead of scheduled on the loop"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(2.0)
+        loop.close()
+
+
 async def test_orphan_sweep_closes_bubble():
     a = FakeAdapter(asyncio.get_running_loop())
     h.register_active_adapter(a)

@@ -55,19 +55,30 @@ def _adapter_for_session(session_id: str) -> Chat4000MatrixAdapter | None:
 
 
 def _schedule_async(adapter: Chat4000MatrixAdapter, coro: Coroutine[Any, Any, None]) -> None:
+    """Run `coro` on the adapter's gateway event loop.
+
+    CRITICAL: the plugin tool hooks (pre/post_tool_call) fire SYNCHRONOUSLY on
+    Hermes' agent worker thread — the gateway runs the agent + tool dispatch via
+    `loop.run_in_executor(...)`, so the hook is NOT on the gateway event-loop
+    thread. `loop.create_task` is loop-thread-only and raises cross-thread; we
+    must hand the coroutine to the loop with `run_coroutine_threadsafe`, or every
+    chat4000.tool emit is silently dropped (the historical bug — tools stopped
+    reaching the client while in-loop chat4000.status kept working)."""
     loop = getattr(adapter, "_loop", None)
-    if loop is None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
     if loop is None or not loop.is_running():
         coro.close()
         return
     try:
-        loop.create_task(coro)
+        on_loop_thread = asyncio.get_running_loop() is loop
+    except RuntimeError:
+        on_loop_thread = False  # no loop in this thread → we're on a worker thread
+    try:
+        if on_loop_thread:
+            loop.create_task(coro)
+        else:
+            asyncio.run_coroutine_threadsafe(coro, loop)  # worker thread → hand off
     except RuntimeError as exc:
-        # Loop not running / closed under us — drop the coroutine cleanly.
+        # Loop closed under us — drop the coroutine cleanly.
         logger.debug("chat4000 hook schedule failed: %s", exc)
         coro.close()
 
