@@ -9,4 +9,4 @@ Telemetry can still be disabled three ways: `hermes chat4000 telemetry
 disable`, `CHAT4000_TELEMETRY_DISABLED=1`, or `--no-telemetry`.
 """
 
-SENTRY_DSN = "https://ac3dabffdf2c91c9c90a87cd9b258908@o4511305222193152.ingest.us.sentry.io/4511433133129728"
+SENTRY_DSN = "https://41cf740535c8a5a722cc1a13f090ea8d@sentry.chat4000.com/2"
