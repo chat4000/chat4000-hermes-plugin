@@ -171,11 +171,13 @@ def set_person_properties(props: dict[str, Any]) -> None:
     from .telemetry import _resolve_install_id
 
     try:
-        _client.identify(distinct_id=_resolve_install_id(), properties=props)
+        # posthog >=7 dropped the client's `identify`; person properties are set
+        # via `set(distinct_id, properties)` (present since 3.x).
+        _client.set(distinct_id=_resolve_install_id(), properties=props)
     except Exception as exc:  # noqa: BLE001
         from .error_log import dump_chat4000_trace
 
-        dump_chat4000_trace("analytics_identify", exc)
+        dump_chat4000_trace("analytics_set_person", exc)
 
 
 # ─── Internals ────────────────────────────────────────────────────────────
