@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from .creds_store import BotCreds, crypto_store_path
-from .crypto_driver import CryptoDriver, load_olm_machine
+from .crypto_driver import CryptoDriver, OlmMachineLike, load_olm_machine
 from .gateway_client import GatewayClient, GatewayCredentials
 from .rooms import RoomManager
 from .sliding_sync import build_sync_request
@@ -29,14 +30,14 @@ from .turns import TurnWriter
 
 logger = logging.getLogger(__name__)
 
-UserMessageCb = Callable[[str, str, dict], Awaitable[None]]  # (room_id, sender, content)
-CommandCb = Callable[[str, str, dict], Awaitable[None]]  # (room_id, command, content)
+UserMessageCb = Callable[[str, str, dict[str, Any]], Awaitable[None]]  # (room_id, sender, content)
+CommandCb = Callable[[str, str, dict[str, Any]], Awaitable[None]]  # (room_id, command, content)
 
 APP_ID = "@chat4000/hermes-plugin"
 
 
-async def _noop_msg(room_id: str, sender: str, content: dict) -> None: ...
-async def _noop_cmd(room_id: str, command: str, content: dict) -> None: ...
+async def _noop_msg(room_id: str, sender: str, content: dict[str, Any]) -> None: ...
+async def _noop_cmd(room_id: str, command: str, content: dict[str, Any]) -> None: ...
 
 
 class MatrixSession:
@@ -48,7 +49,7 @@ class MatrixSession:
         plugin_version: str = "0.0.0",
         on_user_message: UserMessageCb = _noop_msg,
         on_command: CommandCb = _noop_cmd,
-    ):
+    ) -> None:
         self._creds = creds
         self._account_id = account_id
         self._plugin_version = plugin_version
@@ -58,7 +59,7 @@ class MatrixSession:
         self.gateway: GatewayClient | None = None
         self.crypto: CryptoDriver | None = None
         self.rooms: RoomManager | None = None
-        self._machine = None
+        self._machine: OlmMachineLike | None = None
         self._members: list[str] = []
         # room_id → set of currently-joined MXIDs (the real key-share recipients),
         # learned from each sync's `m.room.member` state. Excludes the bot.
@@ -102,7 +103,8 @@ class MatrixSession:
     async def ensure_bootstrap(self) -> None:
         """Create the space + control room if we don't have them yet. Idempotent:
         once the first sync classifies an existing control room, this no-ops."""
-        assert self.rooms is not None
+        if self.rooms is None:
+            raise RuntimeError("ensure_bootstrap called before start() built the room manager")
         # Find existing space/control room first so a restart doesn't duplicate them.
         await self.rooms.discover()
         if self.rooms.space_id is None:
@@ -145,7 +147,7 @@ class MatrixSession:
         room's currently-joined membership, minus the bot itself."""
         s = set(self._members) | self._room_members.get(room_id, set())
         s.discard(self._bot_id)
-        s.discard(None)  # type: ignore[arg-type]
+        s.discard(None)
         return sorted(s)
 
     async def _maybe_track(self) -> None:
@@ -156,12 +158,12 @@ class MatrixSession:
         for joined in self._room_members.values():
             want |= joined
         want.discard(self._bot_id)
-        want.discard(None)  # type: ignore[arg-type]
+        want.discard(None)
         if want != self._tracked and self.crypto is not None:
             self._tracked = set(want)
             await self.crypto.track_users(sorted(want))
 
-    async def _update_room_membership(self, room_id: str, room: dict) -> None:
+    async def _update_room_membership(self, room_id: str, room: dict[str, Any]) -> None:
         """Apply one room's `m.room.member` changes to our recipient set, then
         re-track if the union grew. Joins add, leave/ban/invite-only do not count
         as recipients (only joined devices can use the key)."""
@@ -182,13 +184,15 @@ class MatrixSession:
         await self._maybe_track()
 
     def turn_writer(self, room_id: str) -> TurnWriter:
-        assert self.crypto is not None and self.gateway is not None
+        if self.crypto is None or self.gateway is None:
+            raise RuntimeError("turn_writer called before start() built the crypto/gateway stack")
         return TurnWriter(self.crypto, self.gateway, self.recipients(room_id))
 
     # ─── sync loop + routing ──────────────────────────────────────────────
 
-    async def _on_sync(self, frame: dict) -> None:
-        assert self.crypto is not None and self.rooms is not None
+    async def _on_sync(self, frame: dict[str, Any]) -> None:
+        if self.crypto is None or self.rooms is None:
+            raise RuntimeError("_on_sync fired before start() built the crypto/room stack")
         parsed = await self.crypto.process_sync(frame)
         for room_id, r in parsed.rooms.items():
             self.rooms.classify_room(room_id, r.get("required_state", []))
@@ -199,11 +203,12 @@ class MatrixSession:
                 if ev.get("type") == "m.room.encrypted":
                     await self._handle_encrypted(room_id, ev)
 
-    async def _handle_encrypted(self, room_id: str, ev: dict) -> None:
+    async def _handle_encrypted(self, room_id: str, ev: dict[str, Any]) -> None:
         sender = ev.get("sender")
         if self.gateway is not None and sender == self.gateway.user_id:
             return  # ignore our own echoes
-        assert self.crypto is not None
+        if self.crypto is None:
+            raise RuntimeError("_handle_encrypted fired before start() built the crypto stack")
         clear = await self.crypto.decrypt(ev, room_id)
         if clear is None:
             return
@@ -239,4 +244,9 @@ class MatrixSession:
                 {},
             )
         except Exception as exc:  # noqa: BLE001
+            # Read receipts are a best-effort side channel — never break message
+            # handling. Report once to the sink, then continue.
+            from ..error_log import dump_chat4000_trace
+
             logger.debug("read receipt failed in %s: %s", room_id, exc)
+            dump_chat4000_trace("matrix.read_receipt", exc)

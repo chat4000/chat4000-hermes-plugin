@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from .matrix.creds_store import load_bot_creds
 from .matrix.hermes_adapter import Chat4000MatrixAdapter
@@ -26,12 +27,12 @@ def check_requirements() -> bool:
     return True
 
 
-def validate_config(config=None) -> bool:
+def validate_config(config: object = None) -> bool:
     """Configured enough to connect = we hold a bot login (creds file)."""
     return load_bot_creds("default") is not None
 
 
-def _env_enablement() -> dict | None:
+def _env_enablement() -> dict[str, Any] | None:
     """Auto-enable when bot creds exist. The control room is the home channel, but
     we don't know its id until connect/sync — use the bot MXID as a stable id and
     seed CHAT4000_HOME_CHANNEL so Hermes' first-message prompt doesn't fire."""
@@ -47,17 +48,17 @@ def _env_enablement() -> dict | None:
     }
 
 
-def _make_adapter_class():
+def _make_adapter_class() -> type:
     """BasePlatformAdapter is only importable inside Hermes — build the real class
     dynamically so this module imports cleanly in tests/CI."""
-    from gateway.platforms.base import BasePlatformAdapter  # type: ignore[import-not-found]
+    from gateway.platforms.base import BasePlatformAdapter
 
     _SKIP = {"__dict__", "__weakref__", "__module__", "__qualname__"}
     namespace = {k: v for k, v in Chat4000MatrixAdapter.__dict__.items() if k not in _SKIP}
     return type("Chat4000MatrixAdapter", (BasePlatformAdapter,), namespace)
 
 
-def register(ctx) -> None:
+def register(ctx: Any) -> None:  # noqa: ANN401  # Hermes host plugin context (untyped host object)
     """Plugin entry point — Hermes' loader calls this once on discovery."""
     from . import analytics
     from .plugin_hooks import register_plugin_hooks

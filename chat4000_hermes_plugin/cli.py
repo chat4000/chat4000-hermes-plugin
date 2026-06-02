@@ -22,8 +22,10 @@ import io
 import os
 import secrets
 import sys
+from pathlib import Path
+from typing import Any
 
-from .matrix.creds_store import crypto_store_path, load_bot_creds, save_bot_creds
+from .matrix.creds_store import BotCreds, crypto_store_path, load_bot_creds, save_bot_creds
 from .matrix.registrar_client import RegistrarClient, RegistrarError
 from .matrix.users_store import add_known_user, load_known_users
 from .package_info import read_package_version
@@ -45,7 +47,7 @@ REGISTRAR_URLS = {
 }
 
 
-def _env_file_path():
+def _env_file_path() -> Path:
     """Where the chosen environment is persisted so it survives a fresh shell.
 
     `--stage` (or CHAT4000_ENV) only lives in the process that set it; a later
@@ -60,7 +62,7 @@ def _load_persisted_env() -> str:
     try:
         value = _env_file_path().read_text(encoding="utf-8").strip().lower()
         return value if value in REGISTRAR_URLS else ""
-    except Exception:
+    except OSError:
         return ""
 
 
@@ -72,7 +74,7 @@ def _persist_env(env: str) -> None:
         path = _env_file_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(env + "\n", encoding="utf-8")
-    except Exception:
+    except OSError:
         pass
 
 
@@ -96,7 +98,7 @@ def _resolve_registrar_url() -> str:
 # the client, so treat it as public. Baked in so installs need no token; override
 # with CHAT4000_SERVICE_TOKEN to rotate. Must match the registrar's
 # REGISTRAR_SERVICE_TOKEN.
-DEFAULT_SERVICE_TOKEN = "chat4000_svc_72ee3b80a16f826a173c65450cadd107d5f6912d4d96135a"
+DEFAULT_SERVICE_TOKEN = "chat4000_svc_72ee3b80a16f826a173c65450cadd107d5f6912d4d96135a"  # noqa: S105  # public basic-auth-grade token, ships in client by design
 
 
 def _registrar() -> RegistrarClient:
@@ -109,8 +111,8 @@ def _gen_code() -> str:
     return f"{secrets.randbelow(900000) + 100000:06d}"
 
 
-def _build_chat4000_cli():
-    import click  # type: ignore[import-not-found]
+def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (untyped click object)
+    import click
 
     @click.group(name="chat4000", help="Manage chat4000 (Matrix) onboarding and pairing")
     @click.option(
@@ -120,7 +122,7 @@ def _build_chat4000_cli():
         help="Disable anonymous error reporting for this run.",
     )
     @click.pass_context
-    def chat4000(ctx_obj, no_telemetry: bool):
+    def chat4000(ctx_obj: Any, no_telemetry: bool) -> None:  # noqa: ANN401  # click pass_context object (untyped)
         if no_telemetry:
             os.environ["CHAT4000_TELEMETRY_DISABLED"] = "1"
 
@@ -132,7 +134,7 @@ def _build_chat4000_cli():
         default=False,
         help="Pair against the stage servers (stgcht4.duckdns.org).",
     )
-    def cmd_pair(account, stage):
+    def cmd_pair(account: str, stage: bool) -> None:
         """Onboard (first run) and pair a device with a 6-digit code."""
         if stage:
             os.environ["CHAT4000_ENV"] = "stage"
@@ -148,7 +150,7 @@ def _build_chat4000_cli():
 
     @chat4000.command("status")
     @click.option("--account", default="default", help="Account id")
-    def cmd_status(account):
+    def cmd_status(account: str) -> None:
         """Show the bot identity and paired users."""
         import click as _c
 
@@ -174,30 +176,30 @@ def _build_chat4000_cli():
 
     @chat4000.command("reset")
     @click.option("--account", default="default", help="Account id")
-    def cmd_reset(account):
+    def cmd_reset(account: str) -> None:
         """Wipe bot creds + crypto store + known users (destructive)."""
         _run_reset(account)
 
     @chat4000.command("wizard")
-    def cmd_wizard():
+    def cmd_wizard() -> None:
         """Interactive install wizard."""
         from .install_wizard import main as wizard_main
 
         sys.exit(wizard_main())
 
     @chat4000.group("telemetry")
-    def telemetry_group():
+    def telemetry_group() -> None:
         """Manage anonymous error reporting."""
 
     @telemetry_group.command("status")
-    def cmd_tel_status():
+    def cmd_tel_status() -> None:
         import click as _c
 
         s = get_telemetry_status()
         _c.echo(f"Telemetry: {'enabled' if s['enabled'] else 'disabled'} ({s['reason']})")
 
     @telemetry_group.command("disable")
-    def cmd_tel_disable():
+    def cmd_tel_disable() -> None:
         import click as _c
 
         from . import analytics
@@ -209,7 +211,7 @@ def _build_chat4000_cli():
         _c.echo("Telemetry disabled.")
 
     @telemetry_group.command("enable")
-    def cmd_tel_enable():
+    def cmd_tel_enable() -> None:
         import click as _c
 
         set_telemetry_enabled(True)
@@ -223,7 +225,7 @@ def _build_chat4000_cli():
     return chat4000
 
 
-def register_chat4000_cli(ctx) -> None:
+def register_chat4000_cli(ctx: Any) -> None:  # noqa: ANN401  # Hermes host plugin context (untyped host object)
     ctx.register_cli(_build_chat4000_cli())
 
 
@@ -251,7 +253,7 @@ def main() -> None:
 
 
 async def _run_pair(account: str) -> None:
-    import click  # type: ignore[import-not-found]
+    import click
 
     from . import analytics
 
@@ -294,7 +296,14 @@ async def _run_pair(account: str) -> None:
     if creds is None:
         # Uses the static DEFAULT_SERVICE_TOKEN unless CHAT4000_SERVICE_TOKEN is set.
         onboard_code = _gen_code()
-        creds = await reg.self_onboard(onboard_code, device_name="hermes-plugin")
+        redeemed = await reg.self_onboard(onboard_code, device_name="hermes-plugin")
+        creds = BotCreds(
+            user_id=redeemed.user_id,
+            device_id=redeemed.device_id,
+            access_token=redeemed.access_token,
+            gateway_url=redeemed.gateway_url,
+            plugin_id=redeemed.plugin_id,
+        )
         save_bot_creds(creds, account)
         analytics.track("plugin_onboarded", {"env": env})
         click.echo(f"Onboarded plugin identity: {creds.user_id}")
@@ -327,9 +336,7 @@ async def _run_pair(account: str) -> None:
 
 
 def _run_reset(account: str) -> None:
-    from pathlib import Path
-
-    import click  # type: ignore[import-not-found]
+    import click
 
     from .key_store import resolve_chat4000_plugin_dir
 
@@ -358,8 +365,8 @@ def _run_reset(account: str) -> None:
         click.echo(f'No chat4000 state for account "{account}".')
         return
     click.echo(f'Reset chat4000 account "{account}". Removed:')
-    for p in removed:
-        click.echo(f"  {p}")
+    for removed_path in removed:
+        click.echo(f"  {removed_path}")
     click.echo("Re-pair with: chat4000 pair")
 
 
@@ -373,23 +380,21 @@ def _ensure_plugin_enabled_in_hermes_config() -> None:
     but only activated when enabled here. Best-effort: if yaml/hermes_constants
     aren't importable, no-op (operator can enable manually)."""
     try:
-        import yaml  # type: ignore[import-not-found]
-    except Exception:
+        import yaml
+    except ImportError:
         return
     # Resolve the Hermes home/config path (prefer hermes_constants, fall back to
     # HERMES_HOME / ~/.hermes).
-    cfg_path = None
+    cfg_path: Path
     try:
         from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
 
         cfg_path = get_hermes_home() / "config.yaml"
-    except Exception:
-        from pathlib import Path
-
+    except ImportError:
         home = os.environ.get("HERMES_HOME", "").strip()
         cfg_path = (Path(home).expanduser() if home else Path.home() / ".hermes") / "config.yaml"
     try:
-        import click  # type: ignore[import-not-found]
+        import click
 
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
@@ -408,18 +413,22 @@ def _ensure_plugin_enabled_in_hermes_config() -> None:
         enabled.append("chat4000")
         cfg_path.write_text(yaml.safe_dump(cfg))
         click.echo(f"Enabled chat4000 in Hermes config: {cfg_path}")
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Best-effort config edit (operator can enable manually). Report once,
+        # then continue — never block pairing on a config-write failure.
+        from .error_log import dump_chat4000_trace
+
+        dump_chat4000_trace("cli.enable_plugin_config", exc)
 
 
 def _render_qr_if_possible(payload: str) -> None:
-    import click  # type: ignore[import-not-found]
+    import click
 
     click.echo(f"QR payload: {payload}")
     if not sys.stdout.isatty():
         return
     try:
-        import qrcode  # type: ignore[import-not-found]
+        import qrcode
 
         qr = qrcode.QRCode(border=1)
         qr.add_data(payload)
@@ -427,8 +436,13 @@ def _render_qr_if_possible(payload: str) -> None:
         buf = io.StringIO()
         qr.print_ascii(out=buf, invert=True)
         click.echo(buf.getvalue())
-    except Exception:
-        pass
+    except ImportError:
+        pass  # qrcode not installed — the textual code above is enough
+    except Exception as exc:  # noqa: BLE001
+        # QR rendering is a cosmetic extra; report once, the printed code stands.
+        from .error_log import dump_chat4000_trace
+
+        dump_chat4000_trace("cli.render_qr", exc)
 
 
 def _handle_cli_error(exc: BaseException) -> None:
@@ -436,7 +450,7 @@ def _handle_cli_error(exc: BaseException) -> None:
     failed. Operational registrar errors (backend down, bad token, code in use)
     are tracked to PostHog and printed cleanly — NOT captured as Sentry crashes;
     only unexpected errors get a Sentry trace."""
-    import click  # type: ignore[import-not-found]
+    import click
 
     if isinstance(exc, RegistrarError):
         from . import analytics

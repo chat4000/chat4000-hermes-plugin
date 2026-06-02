@@ -17,17 +17,41 @@ and prove an owner identity, we refuse it with a clear error rather than guess.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .crypto_driver import CryptoDriver
+    from .rooms import RoomManager
+    from .session import MatrixSession
 
 logger = logging.getLogger(__name__)
 
 
 class CommandHandler:
-    def __init__(self, session, *, owner_user_id: str | None = None, version: str = "0.0.0"):
+    def __init__(
+        self,
+        session: MatrixSession,
+        *,
+        owner_user_id: str | None = None,
+        version: str = "0.0.0",
+    ) -> None:
         self._s = session
         self._owner = owner_user_id
         self._version = version
 
-    async def handle(self, room_id: str, command: str, content: dict) -> None:
+    @property
+    def _rooms(self) -> RoomManager:
+        if self._s.rooms is None:
+            raise RuntimeError("command handler used before the session built its rooms")
+        return self._s.rooms
+
+    @property
+    def _crypto(self) -> CryptoDriver:
+        if self._s.crypto is None:
+            raise RuntimeError("command handler used before the session built its crypto driver")
+        return self._s.crypto
+
+    async def handle(self, room_id: str, command: str, content: dict[str, Any]) -> None:
         try:
             if command == "session.new":
                 await self._session_new(content)
@@ -42,20 +66,25 @@ class CommandHandler:
             else:
                 await self._reply(command, {"ok": False, "error": f"unknown command {command!r}"})
         except Exception as exc:  # noqa: BLE001
+            # Command-dispatch boundary: report the unexpected failure once to the
+            # sink, then surface a clean error_result to the control room.
+            from ..error_log import dump_chat4000_trace
+
             logger.warning("command %s failed: %s", command, exc)
+            dump_chat4000_trace("matrix.command", exc, {"command": command})
             await self._reply(command, {"ok": False, "error": str(exc)})
 
     # ─── handlers ─────────────────────────────────────────────────────────
 
-    async def _session_new(self, content: dict) -> None:
+    async def _session_new(self, content: dict[str, Any]) -> None:
         title = content.get("title") or "session"
         agent_id = content.get("agent_id") or "main"
-        room_id = await self._s.rooms.create_session_room(title, agent_id)
+        room_id = await self._rooms.create_session_room(title, agent_id)
         for uid in self._s.members:
-            await self._s.rooms.invite_user(room_id, uid)
+            await self._rooms.invite_user(room_id, uid)
         await self._reply("session.new", {"ok": True, "room_id": room_id})
 
-    async def _session_rename(self, content: dict) -> None:
+    async def _session_rename(self, content: dict[str, Any]) -> None:
         room_id = content.get("room_id")
         title = content.get("title")
         if not room_id or not title:
@@ -63,15 +92,15 @@ class CommandHandler:
                 "session.rename", {"ok": False, "error": "room_id and title required"}
             )
             return
-        await self._s.rooms.rename_session(room_id, title)
+        await self._rooms.rename_session(room_id, title)
         await self._reply("session.rename", {"ok": True, "room_id": room_id})
 
-    async def _session_archive(self, content: dict) -> None:
+    async def _session_archive(self, content: dict[str, Any]) -> None:
         room_id = content.get("room_id")
         if not room_id:
             await self._reply("session.archive", {"ok": False, "error": "room_id required"})
             return
-        await self._s.rooms.archive_session(room_id)
+        await self._rooms.archive_session(room_id)
         await self._reply("session.archive", {"ok": True, "room_id": room_id})
 
     async def _update_check(self) -> None:
@@ -89,7 +118,7 @@ class CommandHandler:
             },
         )
 
-    async def _update(self, content: dict) -> None:
+    async def _update(self, content: dict[str, Any]) -> None:
         # Owner-gated remote code update over chat. Deferred until the registrar
         # defines owner establishment/proof (X4). Refuse cleanly.
         await self._reply(
@@ -99,19 +128,22 @@ class CommandHandler:
 
     # ─── reply ────────────────────────────────────────────────────────────
 
-    async def _reply(self, command: str, fields: dict) -> None:
+    async def _reply(self, command: str, fields: dict[str, Any]) -> None:
         # Coarse, content-free: which command ran and whether it succeeded.
         try:
             from .. import analytics
 
             analytics.track("command_handled", {"command": command, "ok": fields.get("ok")})
-        except Exception:
-            pass
-        control = self._s.rooms.control_room_id
+        except Exception as exc:  # noqa: BLE001
+            # Analytics is best-effort; report once and keep replying.
+            from ..error_log import dump_chat4000_trace
+
+            dump_chat4000_trace("matrix.command_analytics", exc)
+        control = self._rooms.control_room_id
         if control is None:
             logger.warning("no control room; cannot reply to %s", command)
             return
         content = {"msgtype": "chat4000.command_result", "command": command, **fields}
-        await self._s.crypto.send_room_event(
+        await self._crypto.send_room_event(
             control, "m.room.message", content, self._s.recipients(control), push=False
         )

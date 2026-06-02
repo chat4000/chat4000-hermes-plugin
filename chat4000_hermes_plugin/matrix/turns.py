@@ -30,7 +30,7 @@ STATUS_STATE = "chat4000.status"
 class TurnWriter:
     """One per room. Holds nothing durable — the adapter threads anchor/tool ids."""
 
-    def __init__(self, crypto: CryptoDriver, gateway: GatewayClient, members: list[str]):
+    def __init__(self, crypto: CryptoDriver, gateway: GatewayClient, members: list[str]) -> None:
         self._c = crypto
         self._gw = gateway
         self._members = members

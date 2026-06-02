@@ -16,6 +16,7 @@ no identity-preserving refresh until the registrar provides one.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -56,7 +57,8 @@ def load_bot_creds(account_id: str = "default") -> BotCreds | None:
             gateway_url=d["gateway_url"],
             plugin_id=d.get("plugin_id"),
         )
-    except Exception:
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        # Missing / unreadable / malformed creds → unconfigured (callers branch).
         return None
 
 
@@ -64,10 +66,8 @@ def save_bot_creds(creds: BotCreds, account_id: str = "default") -> Path:
     path = _creds_path(account_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(creds), indent=2) + "\n", encoding="utf-8")
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path, 0o600)
-    except OSError:
-        pass
     return path
 
 

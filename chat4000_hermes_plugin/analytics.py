@@ -43,7 +43,7 @@ _client: Any = None  # posthog.Posthog instance
 def _load_credentials() -> tuple[str, str] | None:
     """Return (api_key, host) from generated module or env, else None."""
     try:
-        from . import posthog_dsn_generated  # type: ignore[attr-defined]
+        from . import posthog_dsn_generated
 
         api_key = getattr(posthog_dsn_generated, "POSTHOG_API_KEY", None)
         host = getattr(posthog_dsn_generated, "POSTHOG_HOST", "https://us.i.posthog.com")
@@ -78,7 +78,7 @@ def initialize_chat4000_analytics() -> None:
     api_key, host = creds
 
     try:
-        from posthog import Posthog  # type: ignore[import-not-found]
+        from posthog import Posthog
     except ImportError:
         _disabled_reason = "posthog_sdk_missing"
         return
@@ -97,8 +97,13 @@ def initialize_chat4000_analytics() -> None:
             host,
             _SESSION_ID,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
+        # Analytics init must never break startup; record why it's off and
+        # report the unexpected failure once to the sink.
         _disabled_reason = f"init_failed:{type(exc).__name__}"
+        from .error_log import dump_chat4000_trace
+
+        dump_chat4000_trace("analytics_init", exc)
 
 
 def track(event: str, properties: dict[str, Any] | None = None) -> None:
@@ -122,9 +127,11 @@ def track(event: str, properties: dict[str, Any] | None = None) -> None:
             event=event,
             properties=enriched,
         )
-    except Exception as exc:
-        # Analytics must never break plugin behavior.
-        logger.debug("posthog capture failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        # Analytics must never break plugin behavior — report once to the sink.
+        from .error_log import dump_chat4000_trace
+
+        dump_chat4000_trace("analytics_capture", exc)
 
 
 def flush(timeout: float = 5.0) -> None:
@@ -134,8 +141,10 @@ def flush(timeout: float = 5.0) -> None:
         return
     try:
         _client.flush()
-    except Exception as exc:
-        logger.debug("posthog flush failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        from .error_log import dump_chat4000_trace
+
+        dump_chat4000_trace("analytics_flush", exc)
 
 
 def shutdown() -> None:
@@ -145,8 +154,10 @@ def shutdown() -> None:
         try:
             _client.flush()
             _client.shutdown()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            from .error_log import dump_chat4000_trace
+
+            dump_chat4000_trace("analytics_shutdown", exc)
     _client = None
     _initialized = False
 
@@ -161,8 +172,10 @@ def set_person_properties(props: dict[str, Any]) -> None:
 
     try:
         _client.identify(distinct_id=_resolve_install_id(), properties=props)
-    except Exception as exc:
-        logger.debug("posthog identify failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        from .error_log import dump_chat4000_trace
+
+        dump_chat4000_trace("analytics_identify", exc)
 
 
 # ─── Internals ────────────────────────────────────────────────────────────
@@ -172,7 +185,9 @@ def _universal_properties() -> dict[str, Any]:
     return {
         "source": "hermes-plugin",  # filter events away from iOS client's
         "plugin_version": PACKAGE_VERSION,
-        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "python_version": (
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        ),
         "os_platform": sys.platform,
         "session_id": _SESSION_ID,
         "build_channel": os.environ.get("HERMES_ENV", "production"),

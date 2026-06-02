@@ -49,14 +49,16 @@ class VersionVerdict:
 
 
 class RegistrarError(RuntimeError):
-    def __init__(self, status: int, errcode: str, error: str):
+    def __init__(self, status: int, errcode: str, error: str) -> None:
         super().__init__(f"{status} {errcode}: {error}")
         self.status = status
         self.errcode = errcode
 
 
 class RegistrarClient:
-    def __init__(self, base_url: str, service_token: str | None = None, *, timeout: float = 15.0):
+    def __init__(
+        self, base_url: str, service_token: str | None = None, *, timeout: float = 15.0
+    ) -> None:
         self._base = base_url.rstrip("/")
         self._service_token = service_token
         self._timeout = timeout
@@ -71,7 +73,7 @@ class RegistrarClient:
         plugin_id: str | None = None,
         user_id: str | None = None,
         ttl_seconds: int | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """C.1 — reserve a pairing code. Bearer service token required."""
         body: dict[str, Any] = {"code": code, "kind": kind}
         if plugin_id is not None:
@@ -97,7 +99,7 @@ class RegistrarClient:
             plugin_id=r.get("plugin_id"),
         )
 
-    async def status(self, code: str) -> dict:
+    async def status(self, code: str) -> dict[str, Any]:
         """C.3 — poll pairing completion. Bearer service token required."""
         return await self._get(f"/pair/status?code={code}", auth=True)
 
@@ -149,13 +151,15 @@ class RegistrarClient:
 
     # ─── transport ────────────────────────────────────────────────────────
 
-    async def _post(self, path: str, body: dict, *, auth: bool) -> dict:
+    async def _post(self, path: str, body: dict[str, Any], *, auth: bool) -> dict[str, Any]:
         return await asyncio.to_thread(self._request, "POST", path, body, auth)
 
-    async def _get(self, path: str, *, auth: bool) -> dict:
+    async def _get(self, path: str, *, auth: bool) -> dict[str, Any]:
         return await asyncio.to_thread(self._request, "GET", path, None, auth)
 
-    def _request(self, method: str, path: str, body: dict | None, auth: bool) -> dict:
+    def _request(
+        self, method: str, path: str, body: dict[str, Any] | None, auth: bool
+    ) -> dict[str, Any]:
         url = self._base + path
         data = json.dumps(body).encode("utf-8") if body is not None else None
         headers = {"Content-Type": "application/json"}
@@ -163,16 +167,16 @@ class RegistrarClient:
             if not self._service_token:
                 raise RegistrarError(401, "M_MISSING_TOKEN", "no service token configured")
             headers["Authorization"] = f"Bearer {self._service_token}"
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310  # our own registrar endpoint (default https; override is operator-controlled)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310  # our own registrar endpoint (default https; override is operator-controlled)
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", "replace")
             try:
                 payload = json.loads(raw)
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 payload = {}
             # Don't surface a raw HTML body (e.g. an nginx 502 page) as the error
             # message — give a short, classified message instead.

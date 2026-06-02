@@ -43,18 +43,22 @@ def dump_chat4000_trace(
     if context:
         try:
             lines.append("context: " + json.dumps(context, default=str))
-        except Exception:
+        except (TypeError, ValueError):
             lines.append(f"context: {context}")
 
     try:
         tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
         lines.append(tb.rstrip())
-    except Exception:
+    except (TypeError, ValueError, AttributeError):
+        # Malformed/foreign exception object — log without the traceback.
         pass
 
     lines.append("")  # blank separator
     payload = ("\n".join(lines) + "\n").encode("utf-8")
 
+    # This IS the error sink — it must never recurse into itself, so a write
+    # failure (read-only fs, disk full) is swallowed at OSError, not routed back
+    # through dump_chat4000_trace. Sentry already received the exception above.
     try:
         with _lock:
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +71,6 @@ def dump_chat4000_trace(
                     os.chmod(log_path, 0o600)
             except OSError:
                 pass
-    except Exception:
+    except OSError:
         pass
     return log_path

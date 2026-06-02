@@ -15,9 +15,10 @@ version-locked and re-test on every bump.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
-def build_sync_request(*, timeline_limit: int = 20, window: int = 100) -> dict:
+def build_sync_request(*, timeline_limit: int = 20, window: int = 100) -> dict[str, Any]:
     """The sliding-sync request body the plugin sends in `sync_start`.
 
     One list covering all the plugin's rooms (control + sessions), with the e2ee
@@ -53,15 +54,15 @@ class ParsedSync:
     """A `sync` frame pulled apart for the crypto driver + room layer."""
 
     pos: str | None
-    to_device_events: list[dict] = field(default_factory=list)
+    to_device_events: list[dict[str, Any]] = field(default_factory=list)
     device_lists: dict[str, list[str]] = field(default_factory=lambda: {"changed": [], "left": []})
     one_time_key_counts: dict[str, int] = field(default_factory=dict)
     unused_fallback_keys: list[str] | None = None
     # room_id → {"timeline": [events], "required_state": [events]}
-    rooms: dict[str, dict] = field(default_factory=dict)
+    rooms: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
-def parse_sync_frame(frame: dict) -> ParsedSync:
+def parse_sync_frame(frame: dict[str, Any]) -> ParsedSync:
     """Pull a gateway `sync` frame into its crypto-relevant + room parts.
 
     Defensive against absent sections — early syncs and idle polls carry only
@@ -84,7 +85,7 @@ def parse_sync_frame(frame: dict) -> ParsedSync:
     unused_fallback = list(fallback) if fallback is not None else None
 
     rooms_in = frame.get("rooms") or {}
-    rooms: dict[str, dict] = {}
+    rooms: dict[str, dict[str, Any]] = {}
     for room_id, r in rooms_in.items():
         if not isinstance(r, dict):
             continue
@@ -103,7 +104,7 @@ def parse_sync_frame(frame: dict) -> ParsedSync:
     )
 
 
-def extract_membership(room: dict) -> dict[str, str]:
+def extract_membership(room: dict[str, Any]) -> dict[str, str]:
     """Pull `m.room.member` events from one room's `required_state` + `timeline`
     into a `{mxid: membership}` map (latest-wins; timeline overrides the state
     snapshot). `membership` is one of join|invite|leave|ban|knock.

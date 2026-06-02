@@ -14,6 +14,7 @@ Stored at ~/.hermes/plugins/chat4000/known-users-<account>.json (mode 0600).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -33,7 +34,8 @@ def load_known_users(account_id: str = "default") -> list[str]:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         return [str(u) for u in data.get("users", [])]
-    except Exception:
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+        # Missing / unreadable / malformed store → no known users (callers branch).
         return []
 
 
@@ -49,7 +51,5 @@ def _save(users: list[str], account_id: str) -> None:
     p = _path(account_id)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"users": users}, indent=2) + "\n", encoding="utf-8")
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(p, 0o600)
-    except OSError:
-        pass

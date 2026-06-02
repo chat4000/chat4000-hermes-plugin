@@ -60,11 +60,17 @@ events, so the funnel is correlated across processes.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 # ─── Constants ────────────────────────────────────────────────────────────
@@ -121,9 +127,6 @@ POSTHOG_CAPTURE_URL = f"{POSTHOG_HOST}/capture/"
 SENTRY_DSN = "https://ac3dabffdf2c91c9c90a87cd9b258908@o4511305222193152.ingest.us.sentry.io/4511433133129728"
 INSTALLER_RELEASE = "chat4000-hermes-plugin-installer@1.0.0"
 
-import platform
-import time
-
 _STARTED_AT_MS = int(time.time() * 1000)
 
 # ─── ANSI ─────────────────────────────────────────────────────────────────
@@ -166,10 +169,10 @@ def hdr(msg: str) -> None:
 def banner() -> None:
     print(f"\n{C_MAG}┌─────────────────────────────────────────────────────────────┐{C_RST}")
     print(
-        f"{C_MAG}│{C_RST}  {C_MAG}{C_BOLD}🔐 chat4000{C_RST}  ·  {C_BLU}{C_BOLD}Hermes plugin installer{C_RST}                       {C_MAG}│{C_RST}"
+        f"{C_MAG}│{C_RST}  {C_MAG}{C_BOLD}🔐 chat4000{C_RST}  ·  {C_BLU}{C_BOLD}Hermes plugin installer{C_RST}                       {C_MAG}│{C_RST}"  # noqa: E501  # fixed-width ANSI banner row
     )
     print(
-        f"{C_MAG}│{C_RST}  {C_DIM}Native iPhone / Mac / CLI app for your Hermes agent{C_RST}        {C_MAG}│{C_RST}"
+        f"{C_MAG}│{C_RST}  {C_DIM}Native iPhone / Mac / CLI app for your Hermes agent{C_RST}        {C_MAG}│{C_RST}"  # noqa: E501  # fixed-width ANSI banner row
     )
     print(f"{C_MAG}└─────────────────────────────────────────────────────────────┘{C_RST}\n")
 
@@ -185,26 +188,18 @@ def resolve_install_id() -> str:
             existing = path.read_text(encoding="utf-8").strip()
             if existing:
                 return existing
-        import uuid
-
         new_id = str(uuid.uuid4())
         cfg.mkdir(parents=True, exist_ok=True)
         path.write_text(new_id + "\n", encoding="utf-8")
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(path, 0o600)
-        except OSError:
-            pass
         return new_id
-    except Exception:
-        import uuid
-
+    except OSError:
+        # Read-only / sandboxed fs — fall back to a process-local anonymous id.
         return str(uuid.uuid4())
 
 
 # ─── PostHog without the SDK (stdlib only) ────────────────────────────────
-
-import json
-import uuid
 
 _SESSION_ID = str(uuid.uuid4())
 _TELEMETRY_DISABLED = (
@@ -219,7 +214,9 @@ def _emit(event: str, props: dict | None = None) -> None:
     enriched = {
         "source": "hermes-plugin-installer",
         "installer_version": "1.0.0",
-        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "python_version": (
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        ),
         "os_platform": sys.platform,
         "session_id": _SESSION_ID,
         "arch": platform.machine() or "unknown",
@@ -237,7 +234,7 @@ def _emit(event: str, props: dict | None = None) -> None:
                     if line.startswith("PRETTY_NAME="):
                         os_rel = line.split("=", 1)[1].strip().strip('"')
                         break
-            except Exception:
+            except OSError:
                 pass
             enriched["os_release"] = os_rel
         elif sysname == "Darwin":
@@ -248,7 +245,7 @@ def _emit(event: str, props: dict | None = None) -> None:
             enriched["os_release"] = f"Windows {wv}" if wv else "Windows"
         else:
             enriched["os_release"] = f"{sysname} {platform.release()}".strip()
-    except Exception:
+    except (OSError, ValueError, IndexError):
         enriched["os_release"] = "unknown"
     try:
         in_container = False
@@ -258,31 +255,28 @@ def _emit(event: str, props: dict | None = None) -> None:
             cgroup = Path("/proc/1/cgroup").read_text(errors="ignore")
             in_container = any(s in cgroup for s in ("docker", "kubepods", "containerd", "podman"))
         enriched["is_container"] = in_container
-    except Exception:
+    except OSError:
         enriched["is_container"] = False
-    try:
-        argv_out, skip_next = [], False
-        for a in sys.argv[1:]:
-            if skip_next:
-                argv_out.append("<redacted>")
-                skip_next = False
+    argv_out, skip_next = [], False
+    for a in sys.argv[1:]:
+        if skip_next:
+            argv_out.append("<redacted>")
+            skip_next = False
+            continue
+        if "=" in a:
+            k = a.partition("=")[0]
+            if any(s in k.lower() for s in ("token", "key", "secret", "pass", "dsn")):
+                argv_out.append(f"{k}=<redacted>")
                 continue
-            if "=" in a:
-                k = a.partition("=")[0]
-                if any(s in k.lower() for s in ("token", "key", "secret", "pass", "dsn")):
-                    argv_out.append(f"{k}=<redacted>")
-                    continue
-            if a.startswith(("sk-", "phc_", "ghp_", "Bearer")):
-                argv_out.append("<redacted>")
-                continue
-            if a in ("--token", "--api-key", "--secret", "--password", "--dsn"):
-                argv_out.append(a)
-                skip_next = True
-                continue
+        if a.startswith(("sk-", "phc_", "ghp_", "Bearer")):
+            argv_out.append("<redacted>")
+            continue
+        if a in ("--token", "--api-key", "--secret", "--password", "--dsn"):
             argv_out.append(a)
-        enriched["flags"] = argv_out
-    except Exception:
-        pass
+            skip_next = True
+            continue
+        argv_out.append(a)
+    enriched["flags"] = argv_out
     if props:
         enriched.update(props)
     body = json.dumps(
@@ -293,16 +287,17 @@ def _emit(event: str, props: dict | None = None) -> None:
             "properties": enriched,
         }
     ).encode("utf-8")
-    req = urllib.request.Request(
+    req = urllib.request.Request(  # noqa: S310  # our own PostHog https ingestion endpoint
         POSTHOG_CAPTURE_URL,
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        urllib.request.urlopen(req, timeout=3).read()
-    except Exception:
-        pass  # never break the install
+    # Install telemetry is strictly best-effort — a network failure must never
+    # break the install, and the installer has no chat4000 sink yet (the package
+    # isn't installed). Narrow to the network/URL errors urlopen can raise.
+    with contextlib.suppress(urllib.error.URLError, OSError, TimeoutError):
+        urllib.request.urlopen(req, timeout=3).read()  # noqa: S310  # our own PostHog https ingestion endpoint
 
 
 # ─── Sentry (stdlib envelope POST, no SDK) ────────────────────────────────
@@ -372,7 +367,9 @@ def send_sentry_envelope(exc: BaseException, *, tags: dict | None = None) -> Non
             "environment": os.environ.get("HERMES_ENV") or "production",
             "tags": {
                 "installer": "hermes",
-                "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+                "python_version": (
+                    f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+                ),
                 "os_platform": sys.platform,
                 **(tags or {}),
             },
@@ -394,7 +391,7 @@ def send_sentry_envelope(exc: BaseException, *, tags: dict | None = None) -> Non
         item_payload = json.dumps(event)
         body = (envelope_header + "\n" + item_header + "\n" + item_payload + "\n").encode("utf-8")
 
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310  # our own Sentry https ingestion endpoint
             envelope_url,
             data=body,
             headers={
@@ -406,8 +403,10 @@ def send_sentry_envelope(exc: BaseException, *, tags: dict | None = None) -> Non
             },
             method="POST",
         )
-        urllib.request.urlopen(req, timeout=5).read()
-    except Exception:
+        urllib.request.urlopen(req, timeout=5).read()  # noqa: S310  # our own Sentry https ingestion endpoint
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        # This IS the installer's crash-reporting path — it must never raise back
+        # into _entry() and mask the original crash. Swallow transport/parse errors.
         pass
 
 
@@ -456,7 +455,7 @@ def detect_hermes() -> tuple[str, str] | None:
                     bin_path = m.group(0)
                     if Path(f"{bin_path}/python").exists() or Path(f"{bin_path}/hermes").exists():
                         return (bin_path, _layout_label(bin_path))
-        except Exception:
+        except OSError:
             pass
         # Wrapper-grep missed (symlink, PE launcher, makeWrapper script).
         # Resolve and accept the resolved dir if it has python.
@@ -465,7 +464,7 @@ def detect_hermes() -> tuple[str, str] | None:
             bin_path = str(real.parent)
             if Path(f"{bin_path}/python").exists():
                 return (bin_path, _layout_label(bin_path))
-        except Exception:
+        except OSError:
             pass
 
     # 3. Known layouts with glob support (Homebrew Cellar version dirs).
@@ -479,7 +478,7 @@ def detect_hermes() -> tuple[str, str] | None:
                 for match in reversed(matches):
                     if (match / "python").exists():
                         return (str(match), label)
-            except Exception:
+            except OSError:
                 continue
         else:
             if (Path(expanded) / "python").exists():
@@ -591,7 +590,8 @@ def reset_local_state() -> None:
     state_dir = Path.home() / ".hermes" / "plugins" / "chat4000"
     if state_dir.exists():
         warn(
-            f"Removing {state_dir} (key + ack store) — already-paired devices will fail to decrypt until re-paired."
+            f"Removing {state_dir} (key + ack store) — already-paired devices "
+            "will fail to decrypt until re-paired."
         )
         ans = input(f"{C_YEL}Continue? [y/N]:{C_RST} ").strip().lower()
         if ans not in ("y", "yes"):
@@ -728,7 +728,8 @@ def main() -> int:
             print()
             print(f"{C_BOLD}Tell us where it is, or cancel:{C_RST}")
             print(
-                f"  · type the path to the directory containing {C_CYN}python{C_RST} and {C_CYN}hermes{C_RST}"
+                f"  · type the path to the directory containing "
+                f"{C_CYN}python{C_RST} and {C_CYN}hermes{C_RST}"
             )
             print(f"  · or press {C_CYN}Ctrl+C{C_RST} to cancel and re-run with arguments")
             print()
@@ -743,7 +744,8 @@ def main() -> int:
             print()
             if not sys.stdin.isatty():
                 err(
-                    "(non-interactive shell — cannot prompt. Re-run interactively or pass --hermes-bin.)"
+                    "(non-interactive shell — cannot prompt. "
+                    "Re-run interactively or pass --hermes-bin.)"
                 )
                 _emit(
                     "installer_failed",
@@ -797,7 +799,8 @@ def main() -> int:
         hdr("Uninstall mode")
         uninstall(venv_python, detect_uv())
         ok(
-            "Plugin uninstalled. Local key + state at ~/.hermes/plugins/chat4000 NOT removed (use --reset)."
+            "Plugin uninstalled. Local key + state at ~/.hermes/plugins/chat4000 "
+            "NOT removed (use --reset)."
         )
         return 0
 
@@ -855,7 +858,8 @@ def main() -> int:
         [
             venv_python,
             "-c",
-            "from chat4000_hermes_plugin.package_info import read_package_version; print(read_package_version())",
+            "from chat4000_hermes_plugin.package_info import read_package_version; "
+            "print(read_package_version())",
         ],
         capture_output=True,
         text=True,
@@ -887,7 +891,7 @@ def main() -> int:
     # NOTE: after execv the wizard takes over — any failures from here on
     # are reported by the wizard's own telemetry, not this installer.
     try:
-        os.execv(f"{venv_bin}/chat4000", [f"{venv_bin}/chat4000", "wizard"])
+        os.execv(f"{venv_bin}/chat4000", [f"{venv_bin}/chat4000", "wizard"])  # noqa: S606  # trusted fixed argv (resolved venv chat4000 path)
     except OSError as exc:
         err(f"Could not exec wizard: {exc}")
         _emit(
@@ -913,7 +917,7 @@ def _entry() -> int:
         return 130
     except SystemExit:
         raise
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001  # installer top-level boundary: reports to its own Sentry/PostHog sink, then exits
         err(f"Installer crashed unexpectedly: {type(exc).__name__}: {exc}")
         _emit(
             "installer_crashed",

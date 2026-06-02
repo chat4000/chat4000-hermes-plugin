@@ -137,7 +137,7 @@ def step_pair(venv_bin: str) -> int:
         f"{venv_bin}/chat4000" if venv_bin and Path(f"{venv_bin}/chat4000").exists() else "chat4000"
     )
     try:
-        rc = subprocess.call([pair_bin, "pair"])
+        rc = subprocess.call([pair_bin, "pair"])  # noqa: S603  # trusted fixed argv (resolved chat4000 path)
     except KeyboardInterrupt:
         console.print(f"\n[yellow]{ICO_WAIT}  Pairing cancelled.[/yellow]")
         return 130
@@ -153,7 +153,7 @@ def gw_is_running() -> bool:
     """Detect a live `hermes gateway run` process."""
     try:
         subprocess.run(
-            ["pgrep", "-f", "hermes gateway run"],
+            ["pgrep", "-f", "hermes gateway run"],  # noqa: S607  # trusted fixed argv
             check=True,
             capture_output=True,
         )
@@ -190,7 +190,10 @@ def _wait_until_gateway_gone(timeout: float = 10.0) -> None:
     while time.time() < deadline:
         if not gw_is_running():
             return
-        subprocess.run(["pkill", "-9", "-f", "hermes gateway run"], capture_output=True)
+        subprocess.run(
+            ["pkill", "-9", "-f", "hermes gateway run"],  # noqa: S607  # trusted fixed argv
+            capture_output=True,
+        )
         time.sleep(0.3)
 
 
@@ -202,7 +205,7 @@ def step_gateway() -> int:
     if was_running:
         console.print(f"[cyan]{ICO_INFO}  Gateway is running — killing to load new plugin.[/cyan]")
         subprocess.run(
-            ["pkill", "-9", "-f", "hermes gateway run"],
+            ["pkill", "-9", "-f", "hermes gateway run"],  # noqa: S607  # trusted fixed argv
             capture_output=True,
         )
 
@@ -238,17 +241,17 @@ def start_gateway_nohup() -> int:
     if not hermes:
         console.print(f"[red]{ICO_ERR}  `hermes` not on PATH — can't start gateway.[/red]")
         return 1
-    log_path = "/tmp/gateway.log"
+    log_path = "/tmp/gateway.log"  # noqa: S108  # intentional well-known log path the user tails
     try:
-        logf = open(log_path, "ab")
-        proc = subprocess.Popen(
-            [hermes, "gateway", "run"],
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-        )
-    except Exception as exc:
+        with open(log_path, "ab") as logf:
+            proc = subprocess.Popen(  # noqa: S603  # trusted fixed argv (resolved hermes path)
+                [hermes, "gateway", "run"],
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+    except OSError as exc:
         console.print(f"[red]{ICO_ERR}  Could not start gateway: {exc}[/red]")
         return 1
 
@@ -261,7 +264,10 @@ def start_gateway_nohup() -> int:
     return 0
 
 
-def tail_log_panel(log_path: str = "/tmp/gateway.log", n: int = 12) -> None:
+def tail_log_panel(
+    log_path: str = "/tmp/gateway.log",  # noqa: S108  # intentional well-known log path
+    n: int = 12,
+) -> None:
     p = Path(log_path)
     if not p.exists():
         return
@@ -269,7 +275,7 @@ def tail_log_panel(log_path: str = "/tmp/gateway.log", n: int = 12) -> None:
         all_lines = p.read_text(errors="replace").splitlines()
         # Hide the transient Telegram restart noise — keep every other line.
         lines = [ln for ln in all_lines if "polling conflict" not in ln][-n:]
-    except Exception:
+    except OSError:
         return
     if not lines:
         return

@@ -86,7 +86,8 @@ def suppress_telegram_polling_conflict() -> None:
         def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
             try:
                 msg = record.getMessage()
-            except Exception:
+            except (TypeError, ValueError):
+                # Bad %-format args in the record — let it through unfiltered.
                 return True
             return not ("polling conflict" in msg or "terminated by other getUpdates" in msg)
 

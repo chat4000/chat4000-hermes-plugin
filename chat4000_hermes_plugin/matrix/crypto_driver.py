@@ -54,16 +54,19 @@ class OlmMachineLike(Protocol):
     def update_tracked_users(self, user_ids: list[str]) -> None: ...
 
 
-def load_olm_machine(user_id: str, device_id: str, store_path: str, passphrase: str | None = None):
+def load_olm_machine(
+    user_id: str, device_id: str, store_path: str, passphrase: str | None = None
+) -> OlmMachineLike:
     """Construct the real binding. Imported lazily so this module loads (and the
     rest of the plugin runs) even before the maturin wheel is built."""
-    from chat4000_pyvodozemac import OlmMachine  # type: ignore[import-not-found]
+    from chat4000_pyvodozemac import OlmMachine
 
-    return OlmMachine(user_id, device_id, store_path, passphrase)
+    machine: OlmMachineLike = OlmMachine(user_id, device_id, store_path, passphrase)
+    return machine
 
 
 class CryptoDriver:
-    def __init__(self, machine: OlmMachineLike, gateway: GatewayClient):
+    def __init__(self, machine: OlmMachineLike, gateway: GatewayClient) -> None:
         self._m = machine
         self._gw = gateway
         # One lock serializes all crypto-state mutations. Correctness over
@@ -73,7 +76,7 @@ class CryptoDriver:
 
     # ─── inbound ──────────────────────────────────────────────────────────
 
-    async def process_sync(self, frame: dict) -> ParsedSync:
+    async def process_sync(self, frame: dict[str, Any]) -> ParsedSync:
         """Ingest one `sync` frame. Persists room keys, THEN acks, THEN drains
         outgoing crypto work. Returns the parsed frame so the room layer can
         decrypt + dispatch the timeline."""
@@ -100,15 +103,21 @@ class CryptoDriver:
         await self.drain_outgoing()
         return parsed
 
-    async def decrypt(self, event: dict, room_id: str) -> dict | None:
+    async def decrypt(self, event: dict[str, Any], room_id: str) -> dict[str, Any] | None:
         """Decrypt one `m.room.encrypted` timeline event → cleartext event dict,
         or None on failure (logged, not raised — a single UTD shouldn't kill the
         sync loop)."""
         try:
             clear = await asyncio.to_thread(self._m.decrypt_room_event, json.dumps(event), room_id)
-            return json.loads(clear)
+            decrypted: dict[str, Any] = json.loads(clear)
+            return decrypted
         except Exception as exc:  # noqa: BLE001
+            # A single UTD (unable-to-decrypt) must not kill the sync loop — report
+            # once to the sink and return None so routing skips this event.
+            from ..error_log import dump_chat4000_trace
+
             logger.warning("decrypt failed in %s: %s", room_id, exc)
+            dump_chat4000_trace("matrix.decrypt", exc, {"room_id": room_id})
             return None
 
     # ─── outbound ─────────────────────────────────────────────────────────
@@ -117,11 +126,11 @@ class CryptoDriver:
         self,
         room_id: str,
         event_type: str,
-        content: dict,
+        content: dict[str, Any],
         members: list[str],
         *,
         push: bool | None = None,
-        relates_to: dict | None = None,
+        relates_to: dict[str, Any] | None = None,
         txn_id: str | None = None,
     ) -> str | None:
         """Encrypt `content` and send it to `room_id`. `push`/`relates_to` ride

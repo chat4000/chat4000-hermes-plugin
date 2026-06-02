@@ -27,12 +27,16 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..package_info import read_package_version
 from .commands import CommandHandler
 from .creds_store import load_bot_creds
 from .session import MatrixSession
+from .turns import TurnWriter
+
+if TYPE_CHECKING:
+    from .media import MediaClient
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +56,9 @@ class _TurnState:
 class Chat4000MatrixAdapter:
     """Bound at register() time to BasePlatformAdapter (see adapter._make_adapter_class)."""
 
-    def __init__(self, config, **kwargs):
-        from gateway.config import Platform  # type: ignore[import-not-found]
-        from gateway.platforms.base import BasePlatformAdapter  # type: ignore[import-not-found]
+    def __init__(self, config: Any, **kwargs: Any) -> None:  # noqa: ANN401  # Hermes host config/kwargs (untyped host objects)
+        from gateway.config import Platform
+        from gateway.platforms.base import BasePlatformAdapter
 
         BasePlatformAdapter.__init__(self, config=config, platform=Platform("chat4000"))
         extra = getattr(config, "extra", {}) or {}
@@ -63,10 +67,10 @@ class Chat4000MatrixAdapter:
         self._commands: CommandHandler | None = None
         self._turns: dict[str, _TurnState] = {}
         # tool_id → (room_id, {name, args, event_id}) for hook-driven tool events.
-        self._tools: dict[str, tuple[str, dict]] = {}
+        self._tools: dict[str, tuple[str, dict[str, Any]]] = {}
         self._active_room: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._media = None  # MediaClient, built at connect
+        self._media: MediaClient | None = None  # built at connect
         self._connected = False
 
         # Make this adapter discoverable by plugin_hooks (tool bubbles).
@@ -118,8 +122,13 @@ class Chat4000MatrixAdapter:
                 for uid in users:
                     await self._session.invite_user(uid)
         except Exception as exc:  # noqa: BLE001
+            # connect() boundary: report the unexpected failure once, then convert
+            # to a False return so Hermes can surface "not connected" cleanly.
+            from ..error_log import dump_chat4000_trace
+
             logger.error("chat4000 v2 connect failed: %s", exc)
             analytics.track("gateway_connect_failed", {"reason": type(exc).__name__})
+            dump_chat4000_trace("matrix.connect", exc)
             return False
 
         self._connected = True
@@ -141,12 +150,12 @@ class Chat4000MatrixAdapter:
 
     # ─── inbound callbacks (from MatrixSession) ───────────────────────────
 
-    async def _on_command(self, room_id: str, command: str, content: dict) -> None:
+    async def _on_command(self, room_id: str, command: str, content: dict[str, Any]) -> None:
         if self._commands is not None:
             await self._commands.handle(room_id, command, content)
 
-    async def _on_user_message(self, room_id: str, sender: str, content: dict) -> None:
-        from gateway.platforms.base import (  # type: ignore[import-not-found]
+    async def _on_user_message(self, room_id: str, sender: str, content: dict[str, Any]) -> None:
+        from gateway.platforms.base import (
             MessageEvent,
             MessageType,
         )
@@ -167,7 +176,7 @@ class Chat4000MatrixAdapter:
                     raw = await self._media.download_attachment(file_meta)
                     mime = (content.get("info") or {}).get("mimetype") or "application/octet-stream"
                     ext = "." + (mime.rsplit("/", 1)[-1] or "bin").split(";")[0].strip()
-                    from gateway.platforms.base import (  # type: ignore[import-not-found]
+                    from gateway.platforms.base import (
                         cache_audio_from_bytes,
                         cache_image_from_bytes,
                     )
@@ -183,9 +192,17 @@ class Chat4000MatrixAdapter:
                     media_types.append(mime)
                     text = content.get("body", "") if msgtype not in ("m.image", "m.audio") else ""
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("chat4000: inbound media decrypt failed: %s", exc)
+                    # Media decode is best-effort — a corrupt/undownloadable
+                    # attachment must not drop the whole message. Report once,
+                    # then fall through with the text we have.
+                    from ..error_log import dump_chat4000_trace
 
-        source = self.build_source(chat_id=room_id, user_id=sender, chat_type="dm")
+                    logger.warning("chat4000: inbound media decrypt failed: %s", exc)
+                    dump_chat4000_trace("matrix.inbound_media", exc)
+
+        # build_source / handle_message come from BasePlatformAdapter, mixed in at
+        # register() time (see adapter._make_adapter_class) — invisible to mypy here.
+        source = self.build_source(chat_id=room_id, user_id=sender, chat_type="dm")  # type: ignore[attr-defined]
         event = MessageEvent(
             text=text,
             message_type=message_type,
@@ -197,14 +214,21 @@ class Chat4000MatrixAdapter:
         )
         self._active_room = room_id
         try:
-            await self.handle_message(event)
+            await self.handle_message(event)  # type: ignore[attr-defined]
         finally:
             self._active_room = None
 
     # ─── outbound: oneshot send + typing ──────────────────────────────────
 
-    async def send(self, chat_id: str, content, *, reply_to=None, metadata=None):
-        from gateway.platforms.base import SendResult  # type: ignore[import-not-found]
+    async def send(
+        self,
+        chat_id: str,
+        content: Any,  # noqa: ANN401  # Hermes outbound content (str or host dict)
+        *,
+        reply_to: Any = None,  # noqa: ANN401  # Hermes host reply ref
+        metadata: Any = None,  # noqa: ANN401  # Hermes host metadata
+    ) -> Any:  # noqa: ANN401  # returns Hermes host SendResult (untyped host type)
+        from gateway.platforms.base import SendResult
 
         if self._session is None:
             return SendResult(success=False, error="not connected")
@@ -218,22 +242,33 @@ class Chat4000MatrixAdapter:
         await tw.set_status(chat_id, "idle")
         return SendResult(success=True, message_id=anchor or "")
 
-    async def send_typing(self, chat_id: str, metadata=None) -> None:
+    async def send_typing(
+        self,
+        chat_id: str,
+        metadata: Any = None,  # noqa: ANN401  # Hermes host metadata
+    ) -> None:
         if self._session is not None:
             await self._tw(chat_id).set_status(chat_id, "typing")
 
-    async def get_chat_info(self, chat_id) -> dict:
+    async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": f"chat4000 ({chat_id[:8]}…)", "type": "dm", "chat_id": chat_id}
 
     # ─── tool events (called from plugin_hooks) ───────────────────────────
 
-    async def external_tool_start(self, name: str, args: Any, icon: str = "") -> str:
+    async def external_tool_start(
+        self,
+        name: str,
+        args: Any,  # noqa: ANN401  # dynamic tool-call args
+        icon: str = "",
+    ) -> str:
         """A tool began (from pre_tool_call). Emit a chat4000.tool event related
         to the active turn; returns a tool_id to correlate the end."""
         room = self._active_room
         if not room or self._session is None:
             return ""
         anchor = await self._ensure_anchor(room)
+        if anchor is None:
+            return ""
         tool_id = uuid.uuid4().hex
         args_str = args if isinstance(args, str) else _json(args)
         ev = await self._tw(room).tool_start(
@@ -266,25 +301,27 @@ class Chat4000MatrixAdapter:
 
     # ─── streaming reply pipeline (text + status; Hermes-contract) ────────
 
-    def reply_pipeline_options(self) -> dict:
+    def reply_pipeline_options(self) -> dict[str, Any]:
         if self._session is None:
             return {}
 
-        async def on_reasoning_stream(_p: dict) -> None:
+        async def on_reasoning_stream(_p: dict[str, Any]) -> None:
             if self._active_room:
                 await self._tw(self._active_room).set_status(self._active_room, "thinking")
 
-        async def on_assistant_message_start(_p: dict) -> None:
+        async def on_assistant_message_start(_p: dict[str, Any]) -> None:
             if self._active_room:
                 await self._ensure_anchor(self._active_room)
                 await self._tw(self._active_room).set_status(self._active_room, "typing")
 
-        async def on_partial_reply(payload: dict) -> None:
+        async def on_partial_reply(payload: dict[str, Any]) -> None:
             room = self._active_room
             text = (payload or {}).get("text") or ""
             if not room or not text:
                 return
             anchor = await self._ensure_anchor(room)
+            if anchor is None:
+                return
             st = self._turn_state(room)
             st.last_text = text
             now = self._loop.time() if self._loop else 0.0
@@ -292,7 +329,7 @@ class Chat4000MatrixAdapter:
                 st.last_edit_at = now
                 await self._tw(room).stream_edit(room, anchor, text, final=False)
 
-        async def on_final(payload: dict) -> None:
+        async def on_final(payload: dict[str, Any]) -> None:
             room = self._active_room
             if not room:
                 return
@@ -316,8 +353,10 @@ class Chat4000MatrixAdapter:
 
     # ─── helpers ──────────────────────────────────────────────────────────
 
-    def _tw(self, room_id: str):
-        return self._session.turn_writer(room_id)  # type: ignore[union-attr]
+    def _tw(self, room_id: str) -> TurnWriter:
+        if self._session is None:
+            raise RuntimeError("_tw called before connect() built the session")
+        return self._session.turn_writer(room_id)
 
     def _turn_state(self, room_id: str) -> _TurnState:
         st = self._turns.get(room_id)
@@ -333,8 +372,8 @@ class Chat4000MatrixAdapter:
         return st.anchor_id
 
 
-def _json(v: Any) -> str:
+def _json(v: Any) -> str:  # noqa: ANN401  # dynamic tool-call args payload
     try:
         return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-    except Exception:
+    except (TypeError, ValueError):
         return str(v)

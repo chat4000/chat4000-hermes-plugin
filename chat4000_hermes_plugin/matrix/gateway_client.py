@@ -30,6 +30,7 @@ live above.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
@@ -38,12 +39,14 @@ from dataclasses import dataclass
 from typing import Any
 
 import websockets
+from websockets.asyncio.client import ClientConnection
 
+from ..error_log import dump_chat4000_trace
 from ..reconnect import run_with_reconnect
 
 logger = logging.getLogger(__name__)
 
-SyncHandler = Callable[[dict], Awaitable[None]]
+SyncHandler = Callable[[dict[str, Any]], Awaitable[None]]
 ReauthHandler = Callable[[], Awaitable[str | None]]  # returns a fresh token or None
 
 
@@ -62,7 +65,7 @@ class GatewayCredentials:
 class AuthError(RuntimeError):
     """The gateway rejected `auth` (bad token, or unsupported client version)."""
 
-    def __init__(self, reason: str, min_v: str | None, max_v: str | None):
+    def __init__(self, reason: str, min_v: str | None, max_v: str | None) -> None:
         super().__init__(reason)
         self.reason = reason
         self.min_client_version = min_v
@@ -80,30 +83,30 @@ class GatewayClient:
         on_reauth: ReauthHandler | None = None,
         request_timeout: float = 30.0,
         abort_signal: asyncio.Event | None = None,
-    ):
+    ) -> None:
         self._creds = creds
         self._on_sync = on_sync
         self._on_reauth = on_reauth
         self._request_timeout = request_timeout
         self._abort = abort_signal or asyncio.Event()
 
-        self._ws: websockets.WebSocketClientProtocol | None = None
-        self._pending: dict[str, asyncio.Future] = {}
+        self._ws: ClientConnection | None = None
+        self._pending: dict[str, asyncio.Future[tuple[int, dict[str, Any]]]] = {}
         self._send_lock = asyncio.Lock()
 
         # Sliding-sync state the CLIENT owns (the gateway keeps pos only in
         # memory for the socket; on reconnect we resend our last persisted pos).
-        self._sync_body: dict | None = None
+        self._sync_body: dict[str, Any] | None = None
         self._last_persisted_pos: str | None = None
 
         self.user_id: str | None = None
         self.device_id: str | None = None
-        self._run_task: asyncio.Task | None = None
+        self._run_task: asyncio.Task[None] | None = None
         self._authed = asyncio.Event()
         # Sync frames are handled on a SEPARATE worker, never inline in the read
         # loop — see _sync_worker_loop for why (deadlock avoidance).
-        self._sync_queue: asyncio.Queue = asyncio.Queue()
-        self._sync_worker: asyncio.Task | None = None
+        self._sync_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._sync_worker: asyncio.Task[None] | None = None
 
     # ─── lifecycle ────────────────────────────────────────────────────────
 
@@ -118,24 +121,25 @@ class GatewayClient:
     async def close(self) -> None:
         self._abort.set()
         if self._ws is not None:
-            try:
+            with contextlib.suppress(OSError, websockets.WebSocketException):
                 await self._ws.close()
-            except Exception:
-                pass
         if self._run_task is not None:
             try:
                 await asyncio.wait_for(self._run_task, timeout=2.0)
-            except Exception:
+            except (TimeoutError, asyncio.CancelledError):
+                # Run loop didn't exit in time (or we were cancelled) — force it down.
                 self._run_task.cancel()
 
     # ─── public API used by the crypto driver / room layer ────────────────
 
-    async def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+    async def request(
+        self, method: str, path: str, body: dict[str, Any] | None = None
+    ) -> tuple[int, dict[str, Any]]:
         """Forward a C-S API call. Returns `(status, body)`. This is THE way
         every homeserver call leaves the plugin."""
         await self._authed.wait()
         rid = uuid.uuid4().hex[:32]
-        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        fut: asyncio.Future[tuple[int, dict[str, Any]]] = asyncio.get_running_loop().create_future()
         self._pending[rid] = fut
         frame: dict[str, Any] = {"t": "req", "id": rid, "method": method, "path": path}
         if body is not None:
@@ -146,7 +150,7 @@ class GatewayClient:
         finally:
             self._pending.pop(rid, None)
 
-    async def start_sync(self, body: dict) -> None:
+    async def start_sync(self, body: dict[str, Any]) -> None:
         """Begin/replace the sliding-sync request. Resumes from the last
         persisted pos if we have one."""
         self._sync_body = body
@@ -155,7 +159,7 @@ class GatewayClient:
             frame["pos"] = self._last_persisted_pos
         await self._send(frame)
 
-    async def update_sync(self, body: dict) -> None:
+    async def update_sync(self, body: dict[str, Any]) -> None:
         self._sync_body = body
         await self._send({"t": "sync_update", "body": body})
 
@@ -215,7 +219,7 @@ class GatewayClient:
             }
         )
 
-    async def _dispatch(self, raw: Any) -> None:
+    async def _dispatch(self, raw: str | bytes) -> None:
         try:
             frame = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
@@ -275,11 +279,14 @@ class GatewayClient:
             try:
                 await self._on_sync(frame)
             except Exception as exc:  # noqa: BLE001
+                # One bad sync frame must not kill the worker (and the whole
+                # session). Report once to the sink, then keep draining.
                 logger.warning("sync handler error: %s", exc)
+                dump_chat4000_trace("gateway.sync_worker", exc)
             finally:
                 self._sync_queue.task_done()
 
-    async def _send(self, frame: dict) -> None:
+    async def _send(self, frame: dict[str, Any]) -> None:
         ws = self._ws
         if ws is None:
             raise ConnectionError("gateway not connected")

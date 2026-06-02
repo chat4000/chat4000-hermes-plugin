@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from .crypto import derive_group_id, parse_group_key
 
@@ -96,17 +97,18 @@ def load_stored_group_key(account_id: str) -> StoredChat4000Key | None:
         return None
     try:
         raw = file_path.read_text(encoding="utf-8")
-        parsed = json.loads(raw)
+        parsed: dict[str, Any] = json.loads(raw)
         if parsed.get("version") != 1 or not isinstance(parsed.get("groupKey"), str):
             return None
         group_key_bytes = parse_group_key(parsed["groupKey"])
-        group_id = parsed.get("groupId") or derive_group_id(group_key_bytes)
+        group_id = str(parsed.get("groupId") or derive_group_id(group_key_bytes))
         return StoredChat4000Key(
             group_key_bytes=group_key_bytes,
             group_id=group_id,
             path=file_path,
         )
-    except Exception:
+    except (OSError, json.JSONDecodeError, ValueError, KeyError, TypeError):
+        # Missing / unreadable / malformed key file → unconfigured (callers branch).
         return None
 
 
@@ -121,11 +123,12 @@ def save_stored_group_key(account_id: str, group_key_bytes: bytes) -> StoredChat
 
     now = datetime.now(UTC).isoformat()
     existing = load_stored_group_key(account_id)
+    group_id = derive_group_id(group_key_bytes)
     payload = {
         "version": 1,
         "accountId": _sanitize_account_id(account_id),
         "groupKey": _b64url_no_pad(group_key_bytes),
-        "groupId": derive_group_id(group_key_bytes),
+        "groupId": group_id,
         "createdAt": now if existing is None else existing_created_at(file_path, now),
         "updatedAt": now,
     }
@@ -134,7 +137,7 @@ def save_stored_group_key(account_id: str, group_key_bytes: bytes) -> StoredChat
     _apply_owner_if_needed([file_path.parent, file_path])
     return StoredChat4000Key(
         group_key_bytes=group_key_bytes,
-        group_id=payload["groupId"],
+        group_id=group_id,
         path=file_path,
     )
 
@@ -144,7 +147,7 @@ def existing_created_at(file_path: Path, fallback: str) -> str:
         raw = file_path.read_text(encoding="utf-8")
         parsed = json.loads(raw)
         return parsed.get("createdAt") or fallback
-    except Exception:
+    except (OSError, json.JSONDecodeError, AttributeError):
         return fallback
 
 
@@ -180,21 +183,22 @@ def resolve_chat4000_instance_identity() -> Chat4000InstanceIdentity:
 
     if file_path.exists():
         try:
-            parsed = json.loads(file_path.read_text(encoding="utf-8"))
+            parsed: dict[str, Any] = json.loads(file_path.read_text(encoding="utf-8"))
             if parsed.get("version") == 1 and isinstance(parsed.get("deviceId"), str):
                 _cached_instance = Chat4000InstanceIdentity(
-                    device_id=parsed["deviceId"],
-                    device_name=parsed.get("deviceName") or default_name,
+                    device_id=str(parsed["deviceId"]),
+                    device_name=str(parsed.get("deviceName") or default_name),
                     path=file_path,
                 )
                 return _cached_instance
-        except Exception:
-            pass  # rewrite
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+            pass  # malformed / unreadable → fall through and rewrite
 
     now = datetime.now(UTC).isoformat()
+    device_id = str(uuid.uuid4())
     payload = {
         "version": 1,
-        "deviceId": str(uuid.uuid4()),
+        "deviceId": device_id,
         "deviceName": default_name,
         "createdAt": now,
         "updatedAt": now,
@@ -204,13 +208,13 @@ def resolve_chat4000_instance_identity() -> Chat4000InstanceIdentity:
         file_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         os.chmod(file_path, 0o600)
         _apply_owner_if_needed([file_path.parent, file_path])
-    except Exception:
-        # Read-only fs — fall through to process-local identity.
+    except OSError:
+        # Read-only fs / sandbox — fall through to process-local identity.
         pass
 
     _cached_instance = Chat4000InstanceIdentity(
-        device_id=payload["deviceId"],
-        device_name=payload["deviceName"],
+        device_id=device_id,
+        device_name=default_name,
         path=file_path,
     )
     return _cached_instance

@@ -121,5 +121,10 @@ module = [
     "posthog.*",
     "qrcode.*",
     "nacl.*",
+    # `rich` (wizard UI) and `yaml` (Hermes config edit) are runtime-only deps,
+    # installed in Hermes' venv, absent from the local dev/CI venv — no stubs to
+    # check against here. Same category as posthog/qrcode above.
+    "rich.*",
+    "yaml",
 ]
 ignore_missing_imports = true

@@ -9,6 +9,7 @@ fall back to OUR pyproject for a source checkout.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from pathlib import Path
 
@@ -32,17 +33,16 @@ def read_package_version() -> str:
                     m = _VERSION_RE.search(text)
                     if m:
                         return m.group(1)
-    except Exception:
+    except OSError:
+        # No readable pyproject (pip install / sandboxed fs) — fall through.
         pass
 
     # 2. Installed-package metadata — correct for pip/uv installs.
     try:
         from importlib.metadata import PackageNotFoundError, version
 
-        try:
+        with contextlib.suppress(PackageNotFoundError):
             return version(_DIST_NAME)
-        except PackageNotFoundError:
-            pass
-    except Exception:
+    except ImportError:
         pass
     return "0.0.0"

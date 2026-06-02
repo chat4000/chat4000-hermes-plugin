@@ -16,12 +16,14 @@ Group key model (per chat4000 protocol §3):
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import secrets
 import string
 from dataclasses import dataclass
 
 import nacl.bindings as _nacl_bind
+import nacl.exceptions
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
@@ -74,13 +76,15 @@ def decrypt(nonce_b64: str, ciphertext_b64: str, key: bytes) -> bytes | None:
     try:
         nonce = base64.b64decode(nonce_b64)
         ciphertext = base64.b64decode(ciphertext_b64)
-    except Exception:
+    except (ValueError, TypeError, binascii.Error):
         return None
     if len(nonce) != NONCE_LEN or len(key) != GROUP_KEY_LEN:
         return None
     try:
         return _nacl_bind.crypto_aead_xchacha20poly1305_ietf_decrypt(ciphertext, None, nonce, key)
-    except Exception:
+    except nacl.exceptions.CryptoError:
+        # Auth failure (wrong key, tampered ciphertext) — return None as a security
+        # signal without leaking which check failed.
         return None
 
 
@@ -221,7 +225,8 @@ def unwrap_group_key_from_initiator(
         if plaintext is None or len(plaintext) != GROUP_KEY_LEN:
             return None
         return plaintext
-    except Exception:
+    except (ValueError, TypeError, binascii.Error, nacl.exceptions.CryptoError):
+        # Any decode/ECDH/AEAD failure → generic None (don't leak the cause).
         return None
 
 

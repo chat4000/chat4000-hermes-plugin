@@ -28,6 +28,7 @@ import json
 import secrets
 import urllib.request
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -48,7 +49,7 @@ def _b64url_unpad_decode(s: str) -> bytes:
 # ─── AES-256-CTR core (pure, no I/O) ───────────────────────────────────────
 
 
-def encrypt_attachment(data: bytes) -> tuple[bytes, dict]:
+def encrypt_attachment(data: bytes) -> tuple[bytes, dict[str, Any]]:
     """Encrypt `data` → (ciphertext, file_meta). `file_meta` is the EncryptedFile
     object minus `url` (the caller fills `url` after upload)."""
     key = secrets.token_bytes(32)
@@ -71,7 +72,7 @@ def encrypt_attachment(data: bytes) -> tuple[bytes, dict]:
     return ciphertext, file_meta
 
 
-def decrypt_attachment(ciphertext: bytes, file_meta: dict) -> bytes:
+def decrypt_attachment(ciphertext: bytes, file_meta: dict[str, Any]) -> bytes:
     """Verify the sha256 then AES-256-CTR decrypt. Raises on hash mismatch (a
     tampered/corrupt blob), so callers fail closed."""
     expected = file_meta.get("hashes", {}).get("sha256")
@@ -112,14 +113,14 @@ class MediaClient:
         """GET ciphertext for an mxc:// URI (authenticated media, Matrix 1.11)."""
         return await asyncio.to_thread(self._download, mxc)
 
-    async def upload_attachment(self, data: bytes, content_type: str) -> dict:
+    async def upload_attachment(self, data: bytes, content_type: str) -> dict[str, Any]:
         """Encrypt + upload; returns the full `file` object (with `url`)."""
         ciphertext, meta = encrypt_attachment(data)
         mxc = await self.upload(ciphertext, "application/octet-stream")
         meta["url"] = mxc
         return meta
 
-    async def download_attachment(self, file_meta: dict) -> bytes:
+    async def download_attachment(self, file_meta: dict[str, Any]) -> bytes:
         """Download + verify + decrypt → plaintext bytes."""
         mxc = file_meta.get("url")
         if not mxc:
@@ -130,24 +131,26 @@ class MediaClient:
     # ─── internals ────────────────────────────────────────────────────────
 
     def _upload(self, ciphertext: bytes, content_type: str) -> str:
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310  # our own gateway-host media endpoint
             f"{self.media_base}/_matrix/media/v3/upload",
             data=ciphertext,
             headers={"Authorization": f"Bearer {self.access_token}", "Content-Type": content_type},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310  # our own gateway-host media endpoint
             body = json.loads(resp.read().decode("utf-8"))
-        return body["content_uri"]
+        content_uri: str = body["content_uri"]
+        return content_uri
 
     def _download(self, mxc: str) -> bytes:
         server, media_id = _parse_mxc(mxc)
         url = f"{self.media_base}/_matrix/client/v1/media/download/{server}/{media_id}"
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310  # our own gateway-host media endpoint
             url, headers={"Authorization": f"Bearer {self.access_token}"}, method="GET"
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return resp.read()
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310  # our own gateway-host media endpoint
+            data: bytes = resp.read()
+        return data
 
 
 def _parse_mxc(mxc: str) -> tuple[str, str]:

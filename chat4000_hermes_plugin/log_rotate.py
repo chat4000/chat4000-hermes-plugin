@@ -7,6 +7,7 @@ and good enough for plugin diagnostics."""
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -34,7 +35,5 @@ def rotate_log_if_oversized(
     except OSError:
         # If rename fails (e.g. cross-device on weird mounts), drop the
         # current file so we don't grow unboundedly.
-        try:
+        with contextlib.suppress(OSError):
             log_path.unlink()
-        except OSError:
-            pass

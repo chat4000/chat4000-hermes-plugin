@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from .gateway_client import GatewayClient
 
@@ -65,7 +66,7 @@ class RoomManager:
         )
 
     async def _create_encrypted_room(
-        self, name: str, *, kind: str, extra_kind: dict | None = None
+        self, name: str, *, kind: str, extra_kind: dict[str, Any] | None = None
     ) -> str:
         kind_content = {"kind": kind}
         if extra_kind:
@@ -87,7 +88,7 @@ class RoomManager:
             },
         )
         self._check(status, body, f"create_{kind}_room")
-        room_id = body["room_id"]
+        room_id: str = body["room_id"]
         if self.space_id:
             await self._add_space_child(room_id)
         return room_id
@@ -151,7 +152,7 @@ class RoomManager:
 
     # ─── discovery (from sync) ────────────────────────────────────────────
 
-    def classify_room(self, room_id: str, required_state: list[dict]) -> str | None:
+    def classify_room(self, room_id: str, required_state: list[dict[str, Any]]) -> str | None:
         """Read `chat4000.room_kind` out of a synced room's required_state and
         record the control room. Returns the kind, or None if unmarked."""
         for ev in required_state:
@@ -172,7 +173,9 @@ class RoomManager:
             {"via": [self.server_name]},
         )
 
-    async def _set_state(self, room_id: str, etype: str, state_key: str, content: dict) -> None:
+    async def _set_state(
+        self, room_id: str, etype: str, state_key: str, content: dict[str, Any]
+    ) -> None:
         status, body = await self.gateway.request(
             "PUT",
             f"/_matrix/client/v3/rooms/{room_id}/state/{etype}/{state_key}",
@@ -184,6 +187,6 @@ class RoomManager:
             )
 
     @staticmethod
-    def _check(status: int, body: dict, what: str) -> None:
+    def _check(status: int, body: dict[str, Any], what: str) -> None:
         if status >= 400 or "room_id" not in body:
             raise RuntimeError(f"{what} failed: {status} {body}")

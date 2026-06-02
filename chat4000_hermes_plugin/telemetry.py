@@ -20,11 +20,13 @@ scripts/prepare_release.py). Local dev runs have no DSN and are silent.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sys
 import uuid
 from pathlib import Path
+from typing import Any
 
 from .package_info import read_package_version
 
@@ -40,7 +42,7 @@ TELEMETRY_ENABLED_PATH = CONFIG_DIR / "telemetry-enabled"
 def _load_sentry_dsn() -> str | None:
     """Try the generated module first (release builds), then the env."""
     try:
-        from . import telemetry_dsn_generated  # type: ignore[attr-defined]
+        from . import telemetry_dsn_generated
 
         dsn = getattr(telemetry_dsn_generated, "SENTRY_DSN", None)
         if dsn:
@@ -58,7 +60,7 @@ _sentry_initialized = False
 # ─── Public API ───────────────────────────────────────────────────────────
 
 
-def get_telemetry_status(argv: list[str] | None = None) -> dict:
+def get_telemetry_status(argv: list[str] | None = None) -> dict[str, Any]:
     """Returns dict with keys: enabled (bool), reason (str), install_id (str)."""
     argv = argv if argv is not None else sys.argv
     install_id = _resolve_install_id()
@@ -85,10 +87,8 @@ def get_telemetry_status(argv: list[str] | None = None) -> dict:
 def set_telemetry_enabled(enabled: bool) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     TELEMETRY_ENABLED_PATH.write_text("true\n" if enabled else "false\n", encoding="utf-8")
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(TELEMETRY_ENABLED_PATH, 0o600)
-    except OSError:
-        pass
 
 
 def initialize_chat4000_telemetry() -> None:
@@ -106,7 +106,7 @@ def initialize_chat4000_telemetry() -> None:
         return
 
     try:
-        import sentry_sdk  # type: ignore[import-not-found]
+        import sentry_sdk
 
         sentry_sdk.init(
             dsn=_SENTRY_DSN,
@@ -116,7 +116,9 @@ def initialize_chat4000_telemetry() -> None:
             traces_sample_rate=0.0,
             send_default_pii=False,
             attach_stacktrace=True,
-            before_send=_scrub_event,
+            # Sentry types before_send against its `Event` TypedDict; our hook
+            # treats the event as a plain JSON dict (structurally compatible).
+            before_send=_scrub_event,  # type: ignore[arg-type]
             default_integrations=False,
         )
         sentry_sdk.set_user({"id": status["install_id"]})
@@ -124,22 +126,26 @@ def initialize_chat4000_telemetry() -> None:
         sentry_sdk.set_tag("os_platform", sys.platform)
         sentry_sdk.set_tag("plugin_version", PACKAGE_VERSION)
         _sentry_initialized = True
-    except Exception:
-        # Telemetry must never break plugin startup.
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Telemetry must never break plugin startup. Init failed, so Sentry is
+        # not live — reporting to the sink here only writes errors.log (no Sentry
+        # recursion, since capture early-returns while _sentry_initialized is False).
+        from .error_log import dump_chat4000_trace
+
+        dump_chat4000_trace("telemetry_init", exc)
 
 
 def capture_chat4000_exception(error: BaseException, *, scope: str | None = None) -> None:
     if not _sentry_initialized:
         return
     try:
-        import sentry_sdk  # type: ignore[import-not-found]
+        import sentry_sdk
 
         with sentry_sdk.push_scope() as s:
             if scope:
                 s.set_tag("chat4000_scope", _scrub_secrets(scope))
             sentry_sdk.capture_exception(error)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110  # part of the sink path — must NOT re-enter dump_chat4000_trace (recursion)
         pass
 
 
@@ -165,16 +171,15 @@ def _resolve_install_id() -> str:
         new_id = str(uuid.uuid4())
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         INSTALL_ID_PATH.write_text(new_id + "\n", encoding="utf-8")
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(INSTALL_ID_PATH, 0o600)
-        except OSError:
-            pass
         return new_id
-    except Exception:
+    except OSError:
+        # Read-only / sandboxed fs — fall back to a process-local anonymous id.
         return str(uuid.uuid4())
 
 
-_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"sk-[a-zA-Z0-9]{20,}"), "[REDACTED_API_KEY]"),
     (re.compile(r"ghp_[a-zA-Z0-9]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
@@ -198,7 +203,7 @@ def _scrub_path(value: str) -> str:
     return re.sub(r"/(Users|home)/[^/]+", r"/\1/<user>", value)
 
 
-def _scrub_event(event: dict, hint: dict) -> dict | None:
+def _scrub_event(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
     """Sentry beforeSend hook — strips PII before send."""
     try:
         for exception in (event.get("exception") or {}).get("values", []) or []:
@@ -216,5 +221,5 @@ def _scrub_event(event: dict, hint: dict) -> dict | None:
         (contexts.get("runtime") or {}).pop("env", None)
         (contexts.get("os") or {}).pop("kernel_version", None)
         return event
-    except Exception:
+    except Exception:  # noqa: BLE001  # Sentry before_send hook — must not raise back into the SDK
         return event

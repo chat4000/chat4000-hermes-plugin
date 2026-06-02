@@ -12,7 +12,7 @@ Never logs plaintext message content — even at debug level.
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 LogLevel = Literal["info", "debug"]
 
@@ -31,21 +31,21 @@ class RuntimeLogger:
     """Per-account logger. One instance per active transport — each line
     carries account_id + group_id context."""
 
-    def __init__(self, level: LogLevel, *, account_id: str, group_id: str):
+    def __init__(self, level: LogLevel, *, account_id: str, group_id: str) -> None:
         self._level = level
         self._account_id = account_id
         self._group_id = group_id
 
-    def info(self, event: str, fields: dict | None = None) -> None:
+    def info(self, event: str, fields: dict[str, Any] | None = None) -> None:
         self._write(logging.INFO, event, fields)
 
-    def debug(self, event: str, fields: dict | None = None) -> None:
+    def debug(self, event: str, fields: dict[str, Any] | None = None) -> None:
         if self._level != "debug":
             return
         self._write(logging.DEBUG, event, fields)
 
-    def _write(self, level: int, event: str, fields: dict | None) -> None:
-        merged: dict = {"account_id": self._account_id, "group_id": self._group_id}
+    def _write(self, level: int, event: str, fields: dict[str, Any] | None) -> None:
+        merged: dict[str, Any] = {"account_id": self._account_id, "group_id": self._group_id}
         if fields:
             merged.update(fields)
         details = " ".join(
@@ -54,6 +54,9 @@ class RuntimeLogger:
         line = f"{event}" + (f" {details}" if details else "")
         try:
             _logger.log(level, line)
-        except Exception:
-            # Logging never breaks runtime behaviour.
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Logging is a best-effort side channel and must never break runtime
+            # behaviour — report once to the sink (a different handler), then continue.
+            from .error_log import dump_chat4000_trace
+
+            dump_chat4000_trace("runtime_logger", exc)
