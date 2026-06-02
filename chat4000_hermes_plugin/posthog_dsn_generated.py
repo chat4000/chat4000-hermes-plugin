@@ -11,6 +11,6 @@ Opt out same as Sentry: `chat4000 telemetry disable`,
 `CHAT4000_TELEMETRY_DISABLED=1`, or `--no-telemetry`.
 """
 
-POSTHOG_API_KEY = "phc_s49DnTamyFDnEC6MyumNmmjjf7p455LXCVzPE94hPemZ"
-POSTHOG_HOST = "https://us.i.posthog.com"
-POSTHOG_PROJECT_ID = "393204"
+POSTHOG_API_KEY = "phc_wNRtzk3h5FTw2X6h4CvieEoxdSdqUd42eUqbgW6nD7B4"
+POSTHOG_HOST = "https://posthog.chat4000.com"
+POSTHOG_PROJECT_ID = ""  # self-hosted instance; numeric id not used for ingestion
