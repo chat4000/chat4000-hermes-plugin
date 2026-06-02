@@ -45,9 +45,43 @@ REGISTRAR_URLS = {
 }
 
 
+def _env_file_path():
+    """Where the chosen environment is persisted so it survives a fresh shell.
+
+    `--stage` (or CHAT4000_ENV) only lives in the process that set it; a later
+    `chat4000 pair` in a new shell would otherwise fall back to production. We
+    record the selection here at pair time and read it as a fallback."""
+    from .key_store import resolve_chat4000_plugin_dir
+    return resolve_chat4000_plugin_dir() / "env"
+
+
+def _load_persisted_env() -> str:
+    try:
+        value = _env_file_path().read_text(encoding="utf-8").strip().lower()
+        return value if value in REGISTRAR_URLS else ""
+    except Exception:
+        return ""
+
+
+def _persist_env(env: str) -> None:
+    """Record the environment selection durably (best-effort, never raises)."""
+    if env not in REGISTRAR_URLS:
+        return
+    try:
+        path = _env_file_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(env + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _resolve_env() -> str:
+    # An explicit CHAT4000_ENV wins; else the persisted selection from the last
+    # pair; else production.
     env = os.environ.get("CHAT4000_ENV", "").strip().lower()
-    return env if env in REGISTRAR_URLS else "production"
+    if env in REGISTRAR_URLS:
+        return env
+    return _load_persisted_env() or "production"
 
 
 def _resolve_registrar_url() -> str:
@@ -93,6 +127,9 @@ def _build_chat4000_cli():
         """Onboard (first run) and pair a device with a 6-digit code."""
         if stage:
             os.environ["CHAT4000_ENV"] = "stage"
+        # Persist whatever environment we're pairing against so future
+        # invocations (status, a fresh shell, the gateway) stay on it.
+        _persist_env(_resolve_env())
         try:
             asyncio.run(_run_pair(account))
         except KeyboardInterrupt:
