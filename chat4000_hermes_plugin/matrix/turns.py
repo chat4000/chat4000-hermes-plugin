@@ -1,10 +1,11 @@
-"""Turns, streaming, tool events, and status (protocol E — "Turns & anchoring").
+"""Turns, streaming, tool events, and activity (protocol E — "Turns & anchoring").
 
 One agent reply = one **turn**, anchored by a single `m.room.message` event that
 edits itself via `m.replace` as text streams; the final edit carries the full
 answer and is the ONLY event with `chat4000.push: true`. Tool calls are separate
-`chat4000.tool` events related to the anchor via `m.relates_to:{rel_type:
-"chat4000.turn"}`. Live activity is a cleartext `chat4000.status` state event.
+`chat4000.tool` events linked to the anchor via `chat4000.turn_id`. Live activity
+is signaled with native Matrix typing (`m.typing` on/off) — the old
+`chat4000.status` state event was removed (protocol 67919b9).
 
 Push discipline (the rule that must not be gotten wrong): EVERY event of the turn
 carries `chat4000.push: false` — the anchor, every streaming edit, every tool
@@ -12,9 +13,8 @@ start/edit — EXCEPT the single final answer edit (`true`). The first message o
 the turn MUST be explicitly `false` (absent ⇒ push-eligible ⇒ would wake on the
 opening partial).
 
-Encrypted events go through the crypto driver; the status state event is
-cleartext (state events aren't E2EE in Matrix — accepted, it carries only an
-activity word).
+Encrypted events go through the crypto driver; native `m.typing` is an ephemeral
+EDU (never persisted, no content) sent straight over the gateway.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from .crypto_driver import CryptoDriver
 from .gateway_client import GatewayClient
 
 TOOL_MSGTYPE = "chat4000.tool"
-STATUS_STATE = "chat4000.status"
 
 
 class TurnWriter:
@@ -126,13 +125,18 @@ class TurnWriter:
             relates_to={"rel_type": "m.replace", "event_id": tool_event_id},
         )
 
-    # ─── status (cleartext state event) ───────────────────────────────────
+    # ─── live activity (native m.typing — ephemeral) ──────────────────────
 
-    async def set_status(self, room_id: str, state: str) -> None:
-        """thinking | working | typing | idle. Cleartext state event — overwrites
-        the single `chat4000.status` (state_key "")."""
+    async def set_typing(self, room_id: str, *, typing: bool, timeout_ms: int = 30000) -> None:
+        """Native Matrix typing — the live-activity signal (protocol 67919b9; the
+        old `chat4000.status` state event is gone). `typing=True` with a timeout
+        while a turn is active (refresh before it lapses); `False` clears it when
+        the turn ends. An ephemeral EDU — never persisted, carries only on/off."""
+        body: dict[str, object] = (
+            {"typing": True, "timeout": timeout_ms} if typing else {"typing": False}
+        )
         await self._gw.request(
             "PUT",
-            f"/_matrix/client/v3/rooms/{room_id}/state/{STATUS_STATE}/",
-            {"state": state},
+            f"/_matrix/client/v3/rooms/{room_id}/typing/{self._gw.user_id}",
+            body,
         )

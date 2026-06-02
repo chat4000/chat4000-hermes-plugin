@@ -7,7 +7,7 @@ build_source/MessageEvent/handle_message) is unchanged from v1.
   inbound user message (session room) → handle_message → Hermes agent
   inbound chat4000.command (control)   → CommandHandler
   agent reply (streaming)              → TurnWriter (anchor + m.replace edits)
-  agent reasoning/typing               → chat4000.status state
+  agent live activity                  → native m.typing (on/off)
   agent tool calls                     → chat4000.tool events, via plugin_hooks
                                          (pre/post_tool_call → external_tool_*)
 
@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 # always flushes immediately.
 STREAM_MIN_INTERVAL_S = 0.4
 
+# Native m.typing: signal on with this timeout, re-PUT before it lapses while the
+# turn is still active. (protocol 67919b9 — chat4000.status removed.)
+TYPING_TIMEOUT_MS = 30000
+TYPING_REFRESH_S = 20.0
+
 
 @dataclass
 class _TurnState:
@@ -73,12 +78,12 @@ class Chat4000MatrixAdapter:
         self._media: MediaClient | None = None  # built at connect
         self._connected = False
         # Rooms with an in-flight turn — the ONLY rooms send_typing is allowed to
-        # mark "typing". Cleared the moment a turn ends so Hermes' _keep_typing
-        # loop can't re-assert "typing" after the answer is delivered.
+        # keep typing alive. Cleared the moment a turn ends so Hermes' _keep_typing
+        # loop can't re-light native typing after the answer is delivered.
         self._typing_on: set[str] = set()
-        # Last chat4000.status written per room — dedupes writes so the ~2s
-        # keep-typing re-emits don't spam a new state event every interval.
-        self._last_status: dict[str, str] = {}
+        # room_id → monotonic time of the last typing:true PUT (presence = typing
+        # currently on). Used to throttle refreshes inside the 30s typing timeout.
+        self._typing_at: dict[str, float] = {}
 
         # Make this adapter discoverable by plugin_hooks (tool bubbles).
         from ..plugin_hooks import register_active_adapter
@@ -220,7 +225,7 @@ class Chat4000MatrixAdapter:
             media_types=media_types,
         )
         self._active_room = room_id
-        self._typing_on.add(room_id)  # allow "typing" only for the life of this turn
+        await self._begin_turn(room_id)  # native typing on for the life of this turn
         try:
             await self.handle_message(event)  # type: ignore[attr-defined]
         finally:
@@ -253,45 +258,54 @@ class Chat4000MatrixAdapter:
         await self._end_turn(chat_id)
         return SendResult(success=True, message_id=anchor or "")
 
-    # ─── status lifecycle (chat4000.status state — protocol E) ────────────
+    # ─── live activity (native m.typing — protocol 67919b9) ───────────────
     #
-    # The room's chat4000.status is last-write-wins: thinking|working|typing
-    # while producing a reply, idle the instant it's done. Two invariants:
-    #   1. send_typing (driven by Hermes' ~2s _keep_typing loop) may write
-    #      "typing" ONLY while the room's turn is in flight (_typing_on).
-    #   2. Every turn ends with exactly one "idle" — written by _end_turn, which
-    #      is reached from on_final, the oneshot send(), stop_typing (Hermes'
-    #      turn-end hook), AND the _on_user_message finally (so an errored/early
-    #      turn still closes). Without overriding stop_typing the base class is a
-    #      no-op, so idle was never written and the spinner span forever.
+    # chat4000.status is GONE. Liveness is a single native typing on/off for the
+    # whole active turn (no sub-state). Typing goes on when a turn begins, is
+    # refreshed before the homeserver's 30s timeout while active, and is cleared
+    # when the turn ends (final edit / error / stop_typing). _typing_on gates
+    # Hermes' ~2s keep-typing loop so it can't re-light a finished room.
 
-    async def _set_status(self, room_id: str, state: str) -> None:
-        """Write chat4000.status, deduped — skip if unchanged."""
-        if self._session is None or self._last_status.get(room_id) == state:
+    async def _typing(self, room_id: str, on: bool) -> None:
+        """Drive native m.typing for a room. ON re-PUTs at most every
+        TYPING_REFRESH_S (well inside the 30s timeout); OFF clears it once."""
+        if self._session is None:
             return
-        self._last_status[room_id] = state
-        await self._tw(room_id).set_status(room_id, state)
+        if on:
+            now = self._loop.time() if self._loop else 0.0
+            last = self._typing_at.get(room_id)
+            if last is not None and (now - last) < TYPING_REFRESH_S:
+                return  # still fresh — no need to re-PUT
+            self._typing_at[room_id] = now
+            await self._tw(room_id).set_typing(room_id, typing=True, timeout_ms=TYPING_TIMEOUT_MS)
+        elif room_id in self._typing_at:
+            self._typing_at.pop(room_id, None)
+            await self._tw(room_id).set_typing(room_id, typing=False)
+
+    async def _begin_turn(self, room_id: str) -> None:
+        """Open a turn: allow typing refreshes and signal typing on."""
+        self._typing_on.add(room_id)
+        await self._typing(room_id, True)
 
     async def _end_turn(self, room_id: str) -> None:
-        """Close a turn: stop allowing 'typing' for this room, then write idle once."""
+        """Close a turn: stop allowing typing for this room, then clear it once."""
         self._typing_on.discard(room_id)
-        await self._set_status(room_id, "idle")
+        await self._typing(room_id, False)
 
     async def send_typing(
         self,
         chat_id: str,
         metadata: Any = None,  # noqa: ANN401  # Hermes host metadata
     ) -> None:
-        # Only assert "typing" while THIS room's turn is active. Hermes' keep-typing
-        # loop can fire after the turn ends (and even after stop_typing); the guard
-        # stops it from flipping a finished room back to "typing".
+        # Hermes' keep-typing loop refreshes liveness — but only while THIS room's
+        # turn is active, so it can't re-light typing after the turn ended.
         if self._session is not None and chat_id in self._typing_on:
-            await self._set_status(chat_id, "typing")
+            await self._typing(chat_id, True)
 
     async def stop_typing(self, chat_id: str) -> None:
-        """Hermes calls this at turn teardown to clear the typing indicator. The
-        base class is a no-op (one-shot platforms), so we MUST override it — it's
-        the canonical 'turn done' signal that writes chat4000.status = idle."""
+        """Hermes calls this at turn teardown to clear the indicator. The base
+        class is a no-op (one-shot platforms), so we override it — the canonical
+        'turn done' signal that clears native typing."""
         await self._end_turn(chat_id)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
@@ -319,7 +333,7 @@ class Chat4000MatrixAdapter:
             room, anchor, tool_id=tool_id, name=name, args=args_str, icon=icon
         )
         self._tools[tool_id] = (room, {"name": name, "args": args_str, "event_id": ev})
-        await self._set_status(room, "working")
+        await self._typing(room, True)
         return tool_id
 
     async def external_tool_end(
@@ -351,12 +365,12 @@ class Chat4000MatrixAdapter:
 
         async def on_reasoning_stream(_p: dict[str, Any]) -> None:
             if self._active_room:
-                await self._set_status(self._active_room, "thinking")
+                await self._typing(self._active_room, True)
 
         async def on_assistant_message_start(_p: dict[str, Any]) -> None:
             if self._active_room:
                 await self._ensure_anchor(self._active_room)
-                await self._set_status(self._active_room, "typing")
+                await self._typing(self._active_room, True)
 
         async def on_partial_reply(payload: dict[str, Any]) -> None:
             room = self._active_room

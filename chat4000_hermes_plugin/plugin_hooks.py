@@ -63,7 +63,7 @@ def _schedule_async(adapter: Chat4000MatrixAdapter, coro: Coroutine[Any, Any, No
     thread. `loop.create_task` is loop-thread-only and raises cross-thread; we
     must hand the coroutine to the loop with `run_coroutine_threadsafe`, or every
     chat4000.tool emit is silently dropped (the historical bug — tools stopped
-    reaching the client while in-loop chat4000.status kept working)."""
+    reaching the client while in-loop reply-pipeline writes kept working)."""
     loop = getattr(adapter, "_loop", None)
     if loop is None or not loop.is_running():
         coro.close()
