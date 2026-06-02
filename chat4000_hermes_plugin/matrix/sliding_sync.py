@@ -102,3 +102,23 @@ def parse_sync_frame(frame: dict) -> ParsedSync:
         unused_fallback_keys=unused_fallback,
         rooms=rooms,
     )
+
+
+def extract_membership(room: dict) -> dict[str, str]:
+    """Pull `m.room.member` events from one room's `required_state` + `timeline`
+    into a `{mxid: membership}` map (latest-wins; timeline overrides the state
+    snapshot). `membership` is one of join|invite|leave|ban|knock.
+
+    This is how the plugin learns who is ACTUALLY in a room — the recipient set
+    for Megolm key sharing. With `$LAZY` membership the snapshot only carries the
+    members relevant to the timeline (e.g. anyone who spoke), which is exactly the
+    users we must share keys with."""
+    out: dict[str, str] = {}
+    for ev in list(room.get("required_state") or []) + list(room.get("timeline") or []):
+        if ev.get("type") != "m.room.member":
+            continue
+        mxid = ev.get("state_key")
+        membership = (ev.get("content") or {}).get("membership")
+        if mxid and membership:
+            out[mxid] = membership
+    return out

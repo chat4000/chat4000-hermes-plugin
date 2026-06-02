@@ -111,5 +111,5 @@ class CommandHandler:
             return
         content = {"msgtype": "chat4000.command_result", "command": command, **fields}
         await self._s.crypto.send_room_event(
-            control, "m.room.message", content, self._s.members, push=False
+            control, "m.room.message", content, self._s.recipients(control), push=False
         )

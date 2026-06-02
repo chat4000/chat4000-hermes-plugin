@@ -43,6 +43,9 @@ class FakeSession:
         self.crypto = FakeCrypto()
         self.members = ["@u:hs"]
 
+    def recipients(self, room_id):
+        return list(self.members)
+
 
 async def test_session_new_creates_invites_and_replies():
     s = FakeSession()

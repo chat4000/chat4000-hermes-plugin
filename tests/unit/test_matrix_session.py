@@ -75,3 +75,102 @@ async def test_own_echo_is_dropped():
     own = {"type": "m.room.encrypted", "sender": "@plugin:hs"}
     await _session(clear, cap)._handle_encrypted("!session:hs", own)
     assert cap == []
+
+
+# ─── membership-driven key sharing + read receipts ─────────────────────────
+
+class TrackingCrypto:
+    """FakeCrypto that records track_users + decrypt passthrough."""
+
+    def __init__(self, clear=None):
+        self._clear = clear
+        self.tracked: list = []
+
+    async def track_users(self, user_ids):
+        self.tracked.append(list(user_ids))
+
+    async def decrypt(self, ev, room_id):
+        return self._clear
+
+
+class RequestGateway:
+    user_id = "@plugin:hs"
+
+    def __init__(self):
+        self.requests: list = []
+
+    async def request(self, method, path, body=None):
+        self.requests.append((method, path, body))
+        return 200, {}
+
+
+def _bare_session():
+    creds = BotCreds("@plugin:hs", "DEV", "tok", "wss://gw/ws")
+    s = MatrixSession(creds)
+    s.gateway = RequestGateway()
+    s.crypto = TrackingCrypto()
+    s.rooms = FakeRooms()
+    return s
+
+
+async def test_recipients_union_paired_and_joined_minus_bot():
+    s = _bare_session()
+    await s.set_members(["@owner:hs"])
+    # A second user joins the room (e.g. a device/user that wasn't known at connect).
+    await s._update_room_membership("!sess:hs", {
+        "required_state": [
+            {"type": "m.room.member", "state_key": "@joiner:hs", "content": {"membership": "join"}},
+            {"type": "m.room.member", "state_key": "@plugin:hs", "content": {"membership": "join"}},
+        ],
+    })
+    # The bot is never a recipient; paired owner + the live joiner both are.
+    assert s.recipients("!sess:hs") == ["@joiner:hs", "@owner:hs"]
+    # A different room only sees the paired floor.
+    assert s.recipients("!other:hs") == ["@owner:hs"]
+
+
+async def test_membership_change_retracks_devices():
+    s = _bare_session()
+    await s.set_members(["@owner:hs"])          # track #1: {owner}
+    await s._update_room_membership("!sess:hs", {
+        "timeline": [
+            {"type": "m.room.member", "state_key": "@joiner:hs", "content": {"membership": "join"}},
+        ],
+    })                                           # track #2: {owner, joiner}
+    # Same membership again → no redundant /keys/query.
+    await s._update_room_membership("!sess:hs", {
+        "timeline": [
+            {"type": "m.room.member", "state_key": "@joiner:hs", "content": {"membership": "join"}},
+        ],
+    })
+    assert s.crypto.tracked == [["@owner:hs"], ["@joiner:hs", "@owner:hs"]]
+
+
+async def test_leave_drops_recipient_and_retracks():
+    s = _bare_session()
+    await s.set_members([])
+    await s._update_room_membership("!sess:hs", {
+        "timeline": [{"type": "m.room.member", "state_key": "@u:hs", "content": {"membership": "join"}}],
+    })
+    assert s.recipients("!sess:hs") == ["@u:hs"]
+    await s._update_room_membership("!sess:hs", {
+        "timeline": [{"type": "m.room.member", "state_key": "@u:hs", "content": {"membership": "leave"}}],
+    })
+    assert s.recipients("!sess:hs") == []
+    assert s.crypto.tracked == [["@u:hs"], []]
+
+
+async def test_user_message_sends_read_receipt():
+    creds = BotCreds("@plugin:hs", "DEV", "tok", "wss://gw/ws")
+    cap: list = []
+    async def on_msg(r, sender, c):
+        cap.append((r, sender, c))
+    s = MatrixSession(creds, on_user_message=on_msg)
+    s.gateway = RequestGateway()
+    s.crypto = TrackingCrypto({"type": "m.room.message", "content": {"msgtype": "m.text", "body": "hi"}})
+    s.rooms = FakeRooms()
+    ev = {"type": "m.room.encrypted", "sender": "@u:hs", "event_id": "$msg1"}
+    await s._handle_encrypted("!sess:hs", ev)
+    # Public read receipt POSTed for the exact inbound event, then routed to Hermes.
+    assert ("POST", "/_matrix/client/v3/rooms/!sess:hs/receipt/m.read/$msg1", {}) in s.gateway.requests
+    assert cap == [("!sess:hs", "@u:hs", {"msgtype": "m.text", "body": "hi"})]

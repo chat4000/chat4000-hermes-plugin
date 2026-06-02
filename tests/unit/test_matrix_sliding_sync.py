@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from chat4000_hermes_plugin.matrix.sliding_sync import build_sync_request, parse_sync_frame
+from chat4000_hermes_plugin.matrix.sliding_sync import (
+    build_sync_request,
+    extract_membership,
+    parse_sync_frame,
+)
 
 
 def test_build_request_enables_e2ee_and_to_device():
@@ -45,3 +49,23 @@ def test_parse_sparse_frame_defaults():
     assert p.one_time_key_counts == {}
     assert p.unused_fallback_keys is None
     assert p.rooms == {}
+
+
+def test_extract_membership_state_and_timeline():
+    room = {
+        "required_state": [
+            {"type": "m.room.member", "state_key": "@u:hs", "content": {"membership": "invite"}},
+            {"type": "m.room.member", "state_key": "@bot:hs", "content": {"membership": "join"}},
+            {"type": "m.room.encryption", "state_key": "", "content": {}},  # ignored
+        ],
+        # timeline wins over the state snapshot: the user upgraded invite → join.
+        "timeline": [
+            {"type": "m.room.member", "state_key": "@u:hs", "content": {"membership": "join"}},
+        ],
+    }
+    assert extract_membership(room) == {"@u:hs": "join", "@bot:hs": "join"}
+
+
+def test_extract_membership_empty():
+    assert extract_membership({}) == {}
+    assert extract_membership({"timeline": [{"type": "m.room.message"}]}) == {}

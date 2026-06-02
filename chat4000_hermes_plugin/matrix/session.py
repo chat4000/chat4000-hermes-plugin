@@ -60,6 +60,12 @@ class MatrixSession:
         self.rooms: Optional[RoomManager] = None
         self._machine = None
         self._members: list[str] = []
+        # room_id → set of currently-joined MXIDs (the real key-share recipients),
+        # learned from each sync's `m.room.member` state. Excludes the bot.
+        self._room_members: dict[str, set[str]] = {}
+        # The set we've asked the OlmMachine to track device lists for (so we only
+        # re-issue /keys/query when it actually changes).
+        self._tracked: set[str] = set()
 
     # ─── lifecycle ────────────────────────────────────────────────────────
 
@@ -124,14 +130,60 @@ class MatrixSession:
                 await self.rooms.invite_user(r, user_id)
 
     async def set_members(self, user_ids: list[str]) -> None:
-        """The user(s) we share room keys with (the paired owner + devices)."""
+        """The paired user(s) — the floor of the key-share recipient set. Actual
+        per-room recipients are this UNION the room's live joined membership (so a
+        user who joined after connect still gets keys). Triggers device tracking."""
         self._members = list(user_ids)
-        if self.crypto is not None:
-            await self.crypto.track_users(self._members)
+        await self._maybe_track()
+
+    @property
+    def _bot_id(self) -> Optional[str]:
+        return self.gateway.user_id if self.gateway is not None else None
+
+    def recipients(self, room_id: str) -> list[str]:
+        """Who to share this room's Megolm key with: the paired members UNION the
+        room's currently-joined membership, minus the bot itself."""
+        s = set(self._members) | self._room_members.get(room_id, set())
+        s.discard(self._bot_id)
+        s.discard(None)  # type: ignore[arg-type]
+        return sorted(s)
+
+    async def _maybe_track(self) -> None:
+        """Recompute the union of everyone we must share keys with (paired members
+        + every room's joined members) and, if it changed, tell the OlmMachine to
+        track their device lists (issues /keys/query). Idempotent."""
+        want = set(self._members)
+        for joined in self._room_members.values():
+            want |= joined
+        want.discard(self._bot_id)
+        want.discard(None)  # type: ignore[arg-type]
+        if want != self._tracked and self.crypto is not None:
+            self._tracked = set(want)
+            await self.crypto.track_users(sorted(want))
+
+    async def _update_room_membership(self, room_id: str, room: dict) -> None:
+        """Apply one room's `m.room.member` changes to our recipient set, then
+        re-track if the union grew. Joins add, leave/ban/invite-only do not count
+        as recipients (only joined devices can use the key)."""
+        from .sliding_sync import extract_membership
+
+        memberships = extract_membership(room)
+        if not memberships:
+            return
+        bot = self._bot_id
+        cur = self._room_members.setdefault(room_id, set())
+        for mxid, membership in memberships.items():
+            if mxid == bot:
+                continue
+            if membership == "join":
+                cur.add(mxid)
+            else:
+                cur.discard(mxid)
+        await self._maybe_track()
 
     def turn_writer(self, room_id: str) -> TurnWriter:
         assert self.crypto is not None and self.gateway is not None
-        return TurnWriter(self.crypto, self.gateway, self._members)
+        return TurnWriter(self.crypto, self.gateway, self.recipients(room_id))
 
     # ─── sync loop + routing ──────────────────────────────────────────────
 
@@ -140,6 +192,9 @@ class MatrixSession:
         parsed = await self.crypto.process_sync(frame)
         for room_id, r in parsed.rooms.items():
             self.rooms.classify_room(room_id, r.get("required_state", []))
+            # Learn who's actually in the room → drives key-share recipients +
+            # device tracking. MUST run before we reply into the room.
+            await self._update_room_membership(room_id, r)
             for ev in r.get("timeline", []):
                 if ev.get("type") == "m.room.encrypted":
                     await self._handle_encrypted(room_id, ev)
@@ -163,6 +218,25 @@ class MatrixSession:
                 logger.info("ignoring chat4000.command outside control room (%s)", room_id)
             return
 
-        # User message in a session room → up to Hermes.
+        # User message in a session room → mark read (so the client shows a "read"
+        # tick), then hand up to Hermes.
         if clear.get("type") == "m.room.message" and sender:
+            await self._mark_read(room_id, ev.get("event_id"))
             await self._on_user_message(room_id, sender, content)
+
+    async def _mark_read(self, room_id: str, event_id: Optional[str]) -> None:
+        """Send a public `m.read` receipt for the user's message so their client
+        can render the read tick. Best-effort — never breaks message handling.
+
+        Note: the user's client only SEES this if its own sync subscribes to the
+        receipts extension (client/gateway side); sending it is the plugin's part."""
+        if not event_id or self.gateway is None:
+            return
+        try:
+            await self.gateway.request(
+                "POST",
+                f"/_matrix/client/v3/rooms/{room_id}/receipt/m.read/{event_id}",
+                {},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("read receipt failed in %s: %s", room_id, exc)
