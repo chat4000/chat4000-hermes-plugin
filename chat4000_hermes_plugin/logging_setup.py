@@ -76,7 +76,9 @@ def suppress_telegram_polling_conflict() -> None:
     import os
 
     if os.environ.get("CHAT4000_SUPPRESS_TELEGRAM_CONFLICT", "1").strip().lower() in (
-        "0", "false", "no",
+        "0",
+        "false",
+        "no",
     ):
         return
 

@@ -33,8 +33,9 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
 
 import websockets
 
@@ -43,7 +44,7 @@ from ..reconnect import run_with_reconnect
 logger = logging.getLogger(__name__)
 
 SyncHandler = Callable[[dict], Awaitable[None]]
-ReauthHandler = Callable[[], Awaitable[Optional[str]]]  # returns a fresh token or None
+ReauthHandler = Callable[[], Awaitable[str | None]]  # returns a fresh token or None
 
 
 @dataclass
@@ -61,7 +62,7 @@ class GatewayCredentials:
 class AuthError(RuntimeError):
     """The gateway rejected `auth` (bad token, or unsupported client version)."""
 
-    def __init__(self, reason: str, min_v: Optional[str], max_v: Optional[str]):
+    def __init__(self, reason: str, min_v: str | None, max_v: str | None):
         super().__init__(reason)
         self.reason = reason
         self.min_client_version = min_v
@@ -76,9 +77,9 @@ class GatewayClient:
         creds: GatewayCredentials,
         *,
         on_sync: SyncHandler,
-        on_reauth: Optional[ReauthHandler] = None,
+        on_reauth: ReauthHandler | None = None,
         request_timeout: float = 30.0,
-        abort_signal: Optional[asyncio.Event] = None,
+        abort_signal: asyncio.Event | None = None,
     ):
         self._creds = creds
         self._on_sync = on_sync
@@ -86,23 +87,23 @@ class GatewayClient:
         self._request_timeout = request_timeout
         self._abort = abort_signal or asyncio.Event()
 
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._ws: websockets.WebSocketClientProtocol | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._send_lock = asyncio.Lock()
 
         # Sliding-sync state the CLIENT owns (the gateway keeps pos only in
         # memory for the socket; on reconnect we resend our last persisted pos).
-        self._sync_body: Optional[dict] = None
-        self._last_persisted_pos: Optional[str] = None
+        self._sync_body: dict | None = None
+        self._last_persisted_pos: str | None = None
 
-        self.user_id: Optional[str] = None
-        self.device_id: Optional[str] = None
-        self._run_task: Optional[asyncio.Task] = None
+        self.user_id: str | None = None
+        self.device_id: str | None = None
+        self._run_task: asyncio.Task | None = None
         self._authed = asyncio.Event()
         # Sync frames are handled on a SEPARATE worker, never inline in the read
         # loop — see _sync_worker_loop for why (deadlock avoidance).
         self._sync_queue: asyncio.Queue = asyncio.Queue()
-        self._sync_worker: Optional[asyncio.Task] = None
+        self._sync_worker: asyncio.Task | None = None
 
     # ─── lifecycle ────────────────────────────────────────────────────────
 
@@ -129,9 +130,7 @@ class GatewayClient:
 
     # ─── public API used by the crypto driver / room layer ────────────────
 
-    async def request(
-        self, method: str, path: str, body: Optional[dict] = None
-    ) -> tuple[int, dict]:
+    async def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         """Forward a C-S API call. Returns `(status, body)`. This is THE way
         every homeserver call leaves the plugin."""
         await self._authed.wait()
@@ -199,18 +198,22 @@ class GatewayClient:
                 self._fail_pending(ConnectionError("socket closed"))
                 # Resume sync from our last persisted pos on the next connect.
                 if self._sync_body is not None:
-                    logger.info("gateway socket closed; will resume sync from pos=%s",
-                                self._last_persisted_pos)
+                    logger.info(
+                        "gateway socket closed; will resume sync from pos=%s",
+                        self._last_persisted_pos,
+                    )
 
     async def _send_auth(self, token: str) -> None:
-        await self._send({
-            "t": "auth",
-            "access_token": token,
-            "app_id": self._creds.app_id,
-            "client_version": self._creds.client_version,
-            "platform": self._creds.platform,
-            "release_channel": self._creds.release_channel,
-        })
+        await self._send(
+            {
+                "t": "auth",
+                "access_token": token,
+                "app_id": self._creds.app_id,
+                "client_version": self._creds.client_version,
+                "platform": self._creds.platform,
+                "release_channel": self._creds.release_channel,
+            }
+        )
 
     async def _dispatch(self, raw: Any) -> None:
         try:

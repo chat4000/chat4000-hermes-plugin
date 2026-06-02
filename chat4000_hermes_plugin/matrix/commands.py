@@ -17,13 +17,12 @@ and prove an owner identity, we refuse it with a clear error rather than guess.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
 class CommandHandler:
-    def __init__(self, session, *, owner_user_id: Optional[str] = None, version: str = "0.0.0"):
+    def __init__(self, session, *, owner_user_id: str | None = None, version: str = "0.0.0"):
         self._s = session
         self._owner = owner_user_id
         self._version = version
@@ -60,7 +59,9 @@ class CommandHandler:
         room_id = content.get("room_id")
         title = content.get("title")
         if not room_id or not title:
-            await self._reply("session.rename", {"ok": False, "error": "room_id and title required"})
+            await self._reply(
+                "session.rename", {"ok": False, "error": "room_id and title required"}
+            )
             return
         await self._s.rooms.rename_session(room_id, title)
         await self._reply("session.rename", {"ok": True, "room_id": room_id})
@@ -102,6 +103,7 @@ class CommandHandler:
         # Coarse, content-free: which command ran and whether it succeeded.
         try:
             from .. import analytics
+
             analytics.track("command_handled", {"command": command, "ok": fields.get("ok")})
         except Exception:
             pass

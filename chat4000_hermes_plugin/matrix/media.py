@@ -28,7 +28,6 @@ import json
 import secrets
 import urllib.request
 from dataclasses import dataclass
-from typing import Optional
 from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -103,7 +102,9 @@ class MediaClient:
     access_token: str
     timeout: float = 60.0
 
-    async def upload(self, ciphertext: bytes, content_type: str = "application/octet-stream") -> str:
+    async def upload(
+        self, ciphertext: bytes, content_type: str = "application/octet-stream"
+    ) -> str:
         """POST ciphertext → returns the mxc:// URI."""
         return await asyncio.to_thread(self._upload, ciphertext, content_type)
 
@@ -152,6 +153,6 @@ class MediaClient:
 def _parse_mxc(mxc: str) -> tuple[str, str]:
     if not mxc.startswith("mxc://"):
         raise ValueError(f"not an mxc uri: {mxc!r}")
-    rest = mxc[len("mxc://"):]
+    rest = mxc[len("mxc://") :]
     server, _, media_id = rest.partition("/")
     return server, media_id

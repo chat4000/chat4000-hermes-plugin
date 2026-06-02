@@ -71,14 +71,17 @@ def env_summary() -> dict[str, str]:
     venv_bin = ""
     if hermes_cmd:
         import re
+
         m = re.search(r"/[^\"'\s]+/venv/bin", Path(hermes_cmd).read_text(errors="ignore"))
         venv_bin = m.group(0) if m else ""
 
     from .package_info import read_package_version
+
     plugin_version = read_package_version()
 
     # Where the key file lives (may not exist yet)
     from .key_store import resolve_chat4000_key_file_path
+
     key_path = str(resolve_chat4000_key_file_path("default"))
     key_exists = Path(key_path).exists()
 
@@ -88,10 +91,14 @@ def env_summary() -> dict[str, str]:
     tbl.add_row("hermes", f"[cyan]{hermes_cmd or '(not on PATH)'}[/cyan]")
     tbl.add_row("venv", f"[cyan]{venv_bin or '(unknown)'}[/cyan]")
     tbl.add_row("plugin", f"[green]{plugin_version}[/green]")
-    tbl.add_row("key file", (
-        f"[green]{key_path}[/green]" if key_exists
-        else f"[yellow]{key_path} (will be minted)[/yellow]"
-    ))
+    tbl.add_row(
+        "key file",
+        (
+            f"[green]{key_path}[/green]"
+            if key_exists
+            else f"[yellow]{key_path} (will be minted)[/yellow]"
+        ),
+    )
     console.print(tbl)
     console.print()
 
@@ -120,16 +127,14 @@ def step_pair(venv_bin: str) -> int:
     """Step 1: run the pair handshake. Returns process exit code."""
     rule(f"{ICO_PHONE}  Pair a device", 1, 2)
     console.print(
-        f"[dim]Scan the QR with the chat4000 iOS/macOS app, "
+        "[dim]Scan the QR with the chat4000 iOS/macOS app, "
         "or paste the code into the CLI client.[/dim]"
     )
-    console.print(f"[dim]Press Ctrl-C any time to cancel.[/dim]")
+    console.print("[dim]Press Ctrl-C any time to cancel.[/dim]")
     console.print()
 
     pair_bin = (
-        f"{venv_bin}/chat4000"
-        if venv_bin and Path(f"{venv_bin}/chat4000").exists()
-        else "chat4000"
+        f"{venv_bin}/chat4000" if venv_bin and Path(f"{venv_bin}/chat4000").exists() else "chat4000"
     )
     try:
         rc = subprocess.call([pair_bin, "pair"])
@@ -149,7 +154,8 @@ def gw_is_running() -> bool:
     try:
         subprocess.run(
             ["pgrep", "-f", "hermes gateway run"],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -248,8 +254,7 @@ def start_gateway_nohup() -> int:
 
     # Don't wait on the process; it runs in the background.
     console.print(
-        f"[green]{ICO_OK}  Gateway started (pid {proc.pid}). "
-        f"Log: [cyan]{log_path}[/cyan][/green]"
+        f"[green]{ICO_OK}  Gateway started (pid {proc.pid}). Log: [cyan]{log_path}[/cyan][/green]"
     )
     time.sleep(2)  # let it write the first few lines
     tail_log_panel(log_path)
@@ -269,12 +274,14 @@ def tail_log_panel(log_path: str = "/tmp/gateway.log", n: int = 12) -> None:
     if not lines:
         return
     console.print()
-    console.print(Panel(
-        "\n".join(lines),
-        title=f"[dim]{log_path}[/dim]",
-        border_style="dim",
-        padding=(0, 1),
-    ))
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title=f"[dim]{log_path}[/dim]",
+            border_style="dim",
+            padding=(0, 1),
+        )
+    )
 
 
 def _resolve_chat4000_cmd(venv_bin: str = "") -> str:

@@ -25,7 +25,6 @@ import re
 import sys
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from .package_info import read_package_version
 
@@ -38,7 +37,7 @@ TELEMETRY_ENABLED_PATH = CONFIG_DIR / "telemetry-enabled"
 # ─── DSN loading ──────────────────────────────────────────────────────────
 
 
-def _load_sentry_dsn() -> Optional[str]:
+def _load_sentry_dsn() -> str | None:
     """Try the generated module first (release builds), then the env."""
     try:
         from . import telemetry_dsn_generated  # type: ignore[attr-defined]
@@ -59,7 +58,7 @@ _sentry_initialized = False
 # ─── Public API ───────────────────────────────────────────────────────────
 
 
-def get_telemetry_status(argv: Optional[list[str]] = None) -> dict:
+def get_telemetry_status(argv: list[str] | None = None) -> dict:
     """Returns dict with keys: enabled (bool), reason (str), install_id (str)."""
     argv = argv if argv is not None else sys.argv
     install_id = _resolve_install_id()
@@ -85,9 +84,7 @@ def get_telemetry_status(argv: Optional[list[str]] = None) -> dict:
 
 def set_telemetry_enabled(enabled: bool) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    TELEMETRY_ENABLED_PATH.write_text(
-        "true\n" if enabled else "false\n", encoding="utf-8"
-    )
+    TELEMETRY_ENABLED_PATH.write_text("true\n" if enabled else "false\n", encoding="utf-8")
     try:
         os.chmod(TELEMETRY_ENABLED_PATH, 0o600)
     except OSError:
@@ -132,7 +129,7 @@ def initialize_chat4000_telemetry() -> None:
         pass
 
 
-def capture_chat4000_exception(error: BaseException, *, scope: Optional[str] = None) -> None:
+def capture_chat4000_exception(error: BaseException, *, scope: str | None = None) -> None:
     if not _sentry_initialized:
         return
     try:

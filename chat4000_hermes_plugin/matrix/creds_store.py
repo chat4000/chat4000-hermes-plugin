@@ -18,9 +18,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
 
 from ..key_store import resolve_chat4000_plugin_dir
 
@@ -31,7 +30,7 @@ class BotCreds:
     device_id: str
     access_token: str
     gateway_url: str
-    plugin_id: Optional[str] = None
+    plugin_id: str | None = None
 
     @property
     def server_name(self) -> str:
@@ -44,7 +43,7 @@ def _creds_path(account_id: str = "default") -> Path:
     return resolve_chat4000_plugin_dir() / f"matrix-creds-{safe}.json"
 
 
-def load_bot_creds(account_id: str = "default") -> Optional[BotCreds]:
+def load_bot_creds(account_id: str = "default") -> BotCreds | None:
     path = _creds_path(account_id)
     if not path.exists():
         return None

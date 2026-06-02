@@ -26,7 +26,7 @@ import logging
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -37,15 +37,15 @@ class RedeemResult:
     user_id: str
     device_id: str
     access_token: str
-    plugin_id: Optional[str] = None  # only for kind=plugin
+    plugin_id: str | None = None  # only for kind=plugin
 
 
 @dataclass
 class VersionVerdict:
     action: str  # ok | recommend_upgrade | force_upgrade
-    recommended: Optional[str]
-    current_terms_version: Optional[int]
-    message: Optional[str]
+    recommended: str | None
+    current_terms_version: int | None
+    message: str | None
 
 
 class RegistrarError(RuntimeError):
@@ -56,7 +56,7 @@ class RegistrarError(RuntimeError):
 
 
 class RegistrarClient:
-    def __init__(self, base_url: str, service_token: Optional[str] = None, *, timeout: float = 15.0):
+    def __init__(self, base_url: str, service_token: str | None = None, *, timeout: float = 15.0):
         self._base = base_url.rstrip("/")
         self._service_token = service_token
         self._timeout = timeout
@@ -68,9 +68,9 @@ class RegistrarClient:
         code: str,
         *,
         kind: str = "user",
-        plugin_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        ttl_seconds: Optional[int] = None,
+        plugin_id: str | None = None,
+        user_id: str | None = None,
+        ttl_seconds: int | None = None,
     ) -> dict:
         """C.1 — reserve a pairing code. Bearer service token required."""
         body: dict[str, Any] = {"code": code, "kind": kind}
@@ -82,7 +82,7 @@ class RegistrarClient:
             body["ttl_seconds"] = ttl_seconds
         return await self._post("/pair/register", body, auth=True)
 
-    async def redeem(self, code: str, *, device_name: Optional[str] = None) -> RedeemResult:
+    async def redeem(self, code: str, *, device_name: str | None = None) -> RedeemResult:
         """C.2 — redeem a code (public). Used by the plugin to self-onboard a
         `kind=plugin` code it just registered."""
         body: dict[str, Any] = {"code": code}
@@ -132,7 +132,7 @@ class RegistrarClient:
 
     async def poll_until_complete(
         self, code: str, *, interval: float = 1.5, deadline_s: float = 300.0
-    ) -> Optional[str]:
+    ) -> str | None:
         """Poll `/pair/status` until `completed` (→ returns the user MXID),
         `expired` (→ None), or the deadline. Respects the ≥1 s poll-rate rule."""
         waited = 0.0
@@ -155,7 +155,7 @@ class RegistrarClient:
     async def _get(self, path: str, *, auth: bool) -> dict:
         return await asyncio.to_thread(self._request, "GET", path, None, auth)
 
-    def _request(self, method: str, path: str, body: Optional[dict], auth: bool) -> dict:
+    def _request(self, method: str, path: str, body: dict | None, auth: bool) -> dict:
         url = self._base + path
         data = json.dumps(body).encode("utf-8") if body is not None else None
         headers = {"Content-Type": "application/json"}
@@ -186,6 +186,7 @@ class RegistrarClient:
             raise RegistrarError(e.code, errcode, error) from e
         except urllib.error.URLError as e:
             raise RegistrarError(
-                0, "M_HOMESERVER_UNAVAILABLE",
+                0,
+                "M_HOMESERVER_UNAVAILABLE",
                 f"could not reach the registrar at {self._base}: {e.reason}",
             ) from e

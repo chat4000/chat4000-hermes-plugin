@@ -14,7 +14,7 @@ import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .key_store import resolve_chat4000_plugin_dir
 from .log_rotate import rotate_log_if_oversized
@@ -31,7 +31,7 @@ _lock = threading.Lock()
 def dump_chat4000_trace(
     scope: str,
     error: BaseException,
-    context: Optional[dict[str, Any]] = None,
+    context: dict[str, Any] | None = None,
 ) -> Path:
     capture_chat4000_exception(error, scope=scope)
 

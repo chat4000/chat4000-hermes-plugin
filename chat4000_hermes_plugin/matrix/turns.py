@@ -19,8 +19,6 @@ activity word).
 
 from __future__ import annotations
 
-from typing import Optional
-
 from .crypto_driver import CryptoDriver
 from .gateway_client import GatewayClient
 
@@ -39,7 +37,7 @@ class TurnWriter:
 
     # ─── the answer anchor ────────────────────────────────────────────────
 
-    async def start_turn(self, room_id: str) -> Optional[str]:
+    async def start_turn(self, room_id: str) -> str | None:
         """Post the anchor (empty answer, push:false). Returns its event_id."""
         return await self._c.send_room_event(
             room_id,
@@ -51,7 +49,7 @@ class TurnWriter:
 
     async def stream_edit(
         self, room_id: str, anchor_id: str, text: str, *, final: bool
-    ) -> Optional[str]:
+    ) -> str | None:
         """Edit the anchor with the latest text. `final=True` is the one event
         that wakes the user (`push:true`)."""
         content = {
@@ -72,7 +70,7 @@ class TurnWriter:
 
     async def tool_start(
         self, room_id: str, anchor_id: str, *, tool_id: str, name: str, args: str, icon: str = ""
-    ) -> Optional[str]:
+    ) -> str | None:
         tool = {
             "tool_id": tool_id,
             "name": name,
@@ -103,7 +101,7 @@ class TurnWriter:
         result: str,
         duration_ms: int,
         icon: str = "",
-    ) -> Optional[str]:
+    ) -> str | None:
         tool = {
             "tool_id": tool_id,
             "name": name,

@@ -26,8 +26,8 @@ import asyncio
 import json
 import logging
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any
 
 from ..package_info import read_package_version
 from .commands import CommandHandler
@@ -44,7 +44,7 @@ STREAM_MIN_INTERVAL_S = 0.4
 @dataclass
 class _TurnState:
     room_id: str
-    anchor_id: Optional[str] = None
+    anchor_id: str | None = None
     last_text: str = ""
     last_edit_at: float = 0.0
 
@@ -53,24 +53,25 @@ class Chat4000MatrixAdapter:
     """Bound at register() time to BasePlatformAdapter (see adapter._make_adapter_class)."""
 
     def __init__(self, config, **kwargs):
-        from gateway.platforms.base import BasePlatformAdapter  # type: ignore[import-not-found]
         from gateway.config import Platform  # type: ignore[import-not-found]
+        from gateway.platforms.base import BasePlatformAdapter  # type: ignore[import-not-found]
 
         BasePlatformAdapter.__init__(self, config=config, platform=Platform("chat4000"))
         extra = getattr(config, "extra", {}) or {}
         self._account_id = extra.get("accountId") or extra.get("account_id") or "default"
-        self._session: Optional[MatrixSession] = None
-        self._commands: Optional[CommandHandler] = None
+        self._session: MatrixSession | None = None
+        self._commands: CommandHandler | None = None
         self._turns: dict[str, _TurnState] = {}
         # tool_id → (room_id, {name, args, event_id}) for hook-driven tool events.
         self._tools: dict[str, tuple[str, dict]] = {}
-        self._active_room: Optional[str] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._active_room: str | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._media = None  # MediaClient, built at connect
         self._connected = False
 
         # Make this adapter discoverable by plugin_hooks (tool bubbles).
         from ..plugin_hooks import register_active_adapter
+
         register_active_adapter(self)
 
     @property
@@ -103,12 +104,14 @@ class Chat4000MatrixAdapter:
         self._commands = CommandHandler(self._session, version=read_package_version())
 
         from .media import MediaClient, media_base_from_gateway
+
         self._media = MediaClient(media_base_from_gateway(creds.gateway_url), creds.access_token)
 
         try:
             await self._session.start()
             await self._session.ensure_bootstrap()
             from .users_store import load_known_users
+
             users = load_known_users(self._account_id)
             if users:
                 await self._session.set_members(users)
@@ -126,11 +129,13 @@ class Chat4000MatrixAdapter:
     async def disconnect(self) -> None:
         self._connected = False
         from ..plugin_hooks import deregister_active_adapter
+
         deregister_active_adapter(self)
         if self._session is not None:
             await self._session.stop()
             self._session = None
         from .. import analytics
+
         analytics.track("gateway_stopped", {})
         analytics.flush()
 
@@ -166,8 +171,11 @@ class Chat4000MatrixAdapter:
                         cache_audio_from_bytes,
                         cache_image_from_bytes,
                     )
+
                     if msgtype == "m.image":
-                        media_urls.append(cache_image_from_bytes(raw, ext=".jpg" if ext == ".jpeg" else ext))
+                        media_urls.append(
+                            cache_image_from_bytes(raw, ext=".jpg" if ext == ".jpeg" else ext)
+                        )
                         message_type = MessageType.IMAGE
                     elif msgtype == "m.audio":
                         media_urls.append(cache_audio_from_bytes(raw, ext=ext))
@@ -197,6 +205,7 @@ class Chat4000MatrixAdapter:
 
     async def send(self, chat_id: str, content, *, reply_to=None, metadata=None):
         from gateway.platforms.base import SendResult  # type: ignore[import-not-found]
+
         if self._session is None:
             return SendResult(success=False, error="not connected")
         text = content if isinstance(content, str) else (content or {}).get("text", "")
@@ -234,7 +243,9 @@ class Chat4000MatrixAdapter:
         await self._tw(room).set_status(room, "working")
         return tool_id
 
-    async def external_tool_end(self, tool_id: str, *, status: str = "done", result: str = "") -> None:
+    async def external_tool_end(
+        self, tool_id: str, *, status: str = "done", result: str = ""
+    ) -> None:
         """A tool finished (from post_tool_call). Edit its event to done/failed."""
         entry = self._tools.pop(tool_id, None)
         if entry is None or self._session is None:
@@ -243,8 +254,14 @@ class Chat4000MatrixAdapter:
         if not meta.get("event_id"):
             return
         await self._tw(room).tool_end(
-            room, meta["event_id"], tool_id=tool_id, name=meta["name"],
-            args=meta["args"], status=status, result=result, duration_ms=0,
+            room,
+            meta["event_id"],
+            tool_id=tool_id,
+            name=meta["name"],
+            args=meta["args"],
+            status=status,
+            result=result,
+            duration_ms=0,
         )
 
     # ─── streaming reply pipeline (text + status; Hermes-contract) ────────
@@ -309,7 +326,7 @@ class Chat4000MatrixAdapter:
             self._turns[room_id] = st
         return st
 
-    async def _ensure_anchor(self, room_id: str) -> Optional[str]:
+    async def _ensure_anchor(self, room_id: str) -> str | None:
         st = self._turn_state(room_id)
         if st.anchor_id is None:
             st.anchor_id = await self._tw(room_id).start_turn(room_id)

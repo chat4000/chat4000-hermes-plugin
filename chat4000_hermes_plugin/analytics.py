@@ -27,7 +27,7 @@ import logging
 import os
 import sys
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 from .package_info import read_package_version
 
@@ -36,11 +36,11 @@ logger = logging.getLogger(__name__)
 PACKAGE_VERSION = read_package_version()
 _SESSION_ID = str(uuid.uuid4())  # one per Python process
 _initialized = False
-_disabled_reason: Optional[str] = None
+_disabled_reason: str | None = None
 _client: Any = None  # posthog.Posthog instance
 
 
-def _load_credentials() -> Optional[tuple[str, str]]:
+def _load_credentials() -> tuple[str, str] | None:
     """Return (api_key, host) from generated module or env, else None."""
     try:
         from . import posthog_dsn_generated  # type: ignore[attr-defined]
@@ -65,6 +65,7 @@ def initialize_chat4000_analytics() -> None:
 
     # Reuse the telemetry opt-out check so the two systems share one switch.
     from .telemetry import get_telemetry_status
+
     status = get_telemetry_status()
     if not status["enabled"]:
         _disabled_reason = status["reason"]
@@ -93,13 +94,14 @@ def initialize_chat4000_analytics() -> None:
         _initialized = True
         logger.debug(
             "chat4000 analytics initialized (host=%s, session=%s)",
-            host, _SESSION_ID,
+            host,
+            _SESSION_ID,
         )
     except Exception as exc:
         _disabled_reason = f"init_failed:{type(exc).__name__}"
 
 
-def track(event: str, properties: Optional[dict[str, Any]] = None) -> None:
+def track(event: str, properties: dict[str, Any] | None = None) -> None:
     """Fire a PostHog event. No-op when telemetry is disabled, credentials
     are missing, or the SDK isn't installed."""
     if not _initialized or _client is None:
@@ -156,6 +158,7 @@ def set_person_properties(props: dict[str, Any]) -> None:
     if not _initialized or _client is None:
         return
     from .telemetry import _resolve_install_id
+
     try:
         _client.identify(distinct_id=_resolve_install_id(), properties=props)
     except Exception as exc:

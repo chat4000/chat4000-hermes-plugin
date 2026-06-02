@@ -15,13 +15,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import stat
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 from .crypto import derive_group_id, parse_group_key
 
@@ -59,11 +57,7 @@ def resolve_chat4000_plugin_dir() -> Path:
 
 
 def resolve_chat4000_key_file_path(account_id: str) -> Path:
-    return (
-        resolve_chat4000_plugin_dir()
-        / "keys"
-        / f"{_sanitize_account_id(account_id)}.json"
-    )
+    return resolve_chat4000_plugin_dir() / "keys" / f"{_sanitize_account_id(account_id)}.json"
 
 
 def resolve_chat4000_instance_file_path() -> Path:
@@ -90,10 +84,11 @@ def ensure_stored_group_key(account_id: str = "default") -> StoredChat4000Key:
     if existing is not None:
         return existing
     from .crypto import generate_group_key
+
     return save_stored_group_key(account_id, generate_group_key())
 
 
-def load_stored_group_key(account_id: str) -> Optional[StoredChat4000Key]:
+def load_stored_group_key(account_id: str) -> StoredChat4000Key | None:
     """Read the per-account key file. Returns None on missing / malformed /
     permission errors. Never raises — callers branch on configured state."""
     file_path = resolve_chat4000_key_file_path(account_id)
@@ -124,7 +119,7 @@ def save_stored_group_key(account_id: str, group_key_bytes: bytes) -> StoredChat
     file_path = resolve_chat4000_key_file_path(account_id)
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     existing = load_stored_group_key(account_id)
     payload = {
         "version": 1,
@@ -155,6 +150,7 @@ def existing_created_at(file_path: Path, fallback: str) -> str:
 
 def _b64url_no_pad(b: bytes) -> str:
     import base64
+
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
 
 
@@ -163,12 +159,12 @@ def _b64url_no_pad(b: bytes) -> str:
 
 @dataclass
 class Chat4000InstanceIdentity:
-    device_id: str       # stable UUID across plugin restarts
+    device_id: str  # stable UUID across plugin restarts
     device_name: str
     path: Path
 
 
-_cached_instance: Optional[Chat4000InstanceIdentity] = None
+_cached_instance: Chat4000InstanceIdentity | None = None
 
 
 def resolve_chat4000_instance_identity() -> Chat4000InstanceIdentity:
@@ -195,7 +191,7 @@ def resolve_chat4000_instance_identity() -> Chat4000InstanceIdentity:
         except Exception:
             pass  # rewrite
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     payload = {
         "version": 1,
         "deviceId": str(uuid.uuid4()),
@@ -229,10 +225,10 @@ class Chat4000StateAccess:
     plugin_dir: Path
     keys_dir: Path
     key_file_path: Path
-    current_uid: Optional[int]
-    current_gid: Optional[int]
-    preferred_owner_uid: Optional[int]
-    preferred_owner_gid: Optional[int]
+    current_uid: int | None
+    current_gid: int | None
+    preferred_owner_uid: int | None
+    preferred_owner_gid: int | None
     can_auto_repair_ownership: bool
     has_ownership_mismatch: bool
 
@@ -245,11 +241,7 @@ def inspect_chat4000_state_access(account_id: str) -> Chat4000StateAccess:
     current_uid = os.getuid() if hasattr(os, "getuid") else None
     current_gid = os.getgid() if hasattr(os, "getgid") else None
     owner_uid, owner_gid = _resolve_preferred_owner(key_file_path)
-    has_mismatch = (
-        current_uid is not None
-        and owner_uid is not None
-        and current_uid != owner_uid
-    )
+    has_mismatch = current_uid is not None and owner_uid is not None and current_uid != owner_uid
     can_repair = current_uid == 0 and owner_uid is not None
     return Chat4000StateAccess(
         state_dir=state_dir,
@@ -265,7 +257,7 @@ def inspect_chat4000_state_access(account_id: str) -> Chat4000StateAccess:
     )
 
 
-def _resolve_preferred_owner(target: Path) -> tuple[Optional[int], Optional[int]]:
+def _resolve_preferred_owner(target: Path) -> tuple[int | None, int | None]:
     current = target.parent.resolve()
     while True:
         if current.exists():

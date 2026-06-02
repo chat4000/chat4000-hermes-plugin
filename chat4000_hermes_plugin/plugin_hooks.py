@@ -24,7 +24,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_ADAPTERS: "weakref.WeakSet" = weakref.WeakSet()
+_ACTIVE_ADAPTERS: weakref.WeakSet = weakref.WeakSet()
 
 # (task_id, tool_name) → FIFO of (adapter, tool_id) awaiting their post_tool_call.
 _PENDING_TOOL_CALLS: dict[tuple[str, str], list[tuple[Any, str]]] = {}
@@ -99,6 +99,7 @@ def on_pre_tool_call(
     icon = ""
     try:
         from agent.display import get_tool_emoji  # type: ignore[import-not-found]
+
         icon = get_tool_emoji(tool_name, default="")
     except Exception:
         pass
@@ -138,7 +139,8 @@ def on_post_llm_call(*, session_id: str = "", platform: str = "", **_: Any) -> N
     if not session_id or (platform or "").strip().lower() != "chat4000":
         return
     orphans = [
-        (key, queue) for key, queue in list(_PENDING_TOOL_CALLS.items())
+        (key, queue)
+        for key, queue in list(_PENDING_TOOL_CALLS.items())
         if key[0] == session_id and queue
     ]
     for key, queue in orphans:

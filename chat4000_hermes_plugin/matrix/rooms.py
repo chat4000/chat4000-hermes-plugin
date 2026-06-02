@@ -19,9 +19,7 @@ discovers them from sync.
 from __future__ import annotations
 
 import logging
-import uuid
 from dataclasses import dataclass
-from typing import Optional
 
 from .gateway_client import GatewayClient
 
@@ -35,8 +33,8 @@ ROOM_KIND = "chat4000.room_kind"
 class RoomManager:
     gateway: GatewayClient
     server_name: str  # for m.space.child `via`
-    space_id: Optional[str] = None
-    control_room_id: Optional[str] = None
+    space_id: str | None = None
+    control_room_id: str | None = None
 
     # ─── creation ─────────────────────────────────────────────────────────
 
@@ -67,7 +65,7 @@ class RoomManager:
         )
 
     async def _create_encrypted_room(
-        self, name: str, *, kind: str, extra_kind: Optional[dict] = None
+        self, name: str, *, kind: str, extra_kind: dict | None = None
     ) -> str:
         kind_content = {"kind": kind}
         if extra_kind:
@@ -153,7 +151,7 @@ class RoomManager:
 
     # ─── discovery (from sync) ────────────────────────────────────────────
 
-    def classify_room(self, room_id: str, required_state: list[dict]) -> Optional[str]:
+    def classify_room(self, room_id: str, required_state: list[dict]) -> str | None:
         """Read `chat4000.room_kind` out of a synced room's required_state and
         record the control room. Returns the kind, or None if unmarked."""
         for ev in required_state:
@@ -181,7 +179,9 @@ class RoomManager:
             content,
         )
         if status >= 400:
-            logger.warning("set_state %s/%s in %s failed: %s %s", etype, state_key, room_id, status, body)
+            logger.warning(
+                "set_state %s/%s in %s failed: %s %s", etype, state_key, room_id, status, body
+            )
 
     @staticmethod
     def _check(status: int, body: dict, what: str) -> None:

@@ -12,7 +12,7 @@ and ignored by older receivers per §6.6.9 dedup contract.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 # ─── Plugin config (loaded from Hermes platform config + env vars) ─────────
 
@@ -27,7 +27,7 @@ class Chat4000AccountConfig:
     pairing_log_level: PairingLogLevel = "info"
     runtime_log_level: RuntimeLogLevel = "info"
     release_channel: str = "production"
-    group_key: Optional[str] = None  # legacy/manual override
+    group_key: str | None = None  # legacy/manual override
     text_chunk_limit: int = 4096
     block_streaming: bool = False
 
@@ -35,7 +35,7 @@ class Chat4000AccountConfig:
 @dataclass
 class Chat4000Config(Chat4000AccountConfig):
     accounts: dict[str, Chat4000AccountConfig] = field(default_factory=dict)
-    default_account: Optional[str] = None
+    default_account: str | None = None
 
 
 @dataclass
@@ -70,21 +70,21 @@ class RelayHelloPayload:
     device_token: None  # plugins never have APNs tokens
     app_version: str
     release_channel: str
-    last_acked_seq: Optional[int] = None
+    last_acked_seq: int | None = None
 
 
 @dataclass
 class RelayVersionPolicy:
-    min_version: Optional[str] = None
-    recommended_version: Optional[str] = None
-    latest_version: Optional[str] = None
+    min_version: str | None = None
+    recommended_version: str | None = None
+    latest_version: str | None = None
 
 
 @dataclass
 class RelayHelloOkPayload:
-    current_terms_version: Optional[int] = None
-    version_policy: Optional[RelayVersionPolicy] = None
-    plugin_version_policy: Optional[RelayVersionPolicy] = None
+    current_terms_version: int | None = None
+    version_policy: RelayVersionPolicy | None = None
+    plugin_version_policy: RelayVersionPolicy | None = None
 
 
 @dataclass
@@ -93,7 +93,7 @@ class RelayMsgPayload:
     nonce: str
     ciphertext: str
     notify_if_offline: bool = False
-    seq: Optional[int] = None
+    seq: int | None = None
 
 
 @dataclass
@@ -173,18 +173,19 @@ ToolStatus = Literal["running", "done", "failed"]
 @dataclass
 class InnerMessageFrom:
     role: Literal["app", "plugin"]
-    device_id: Optional[str] = None
-    device_name: Optional[str] = None
-    app_version: Optional[str] = None
-    bundle_id: Optional[str] = None
+    device_id: str | None = None
+    device_name: str | None = None
+    app_version: str | None = None
+    bundle_id: str | None = None
 
 
 @dataclass
 class InnerMessage:
     """The plaintext inside an encrypted relay envelope."""
+
     t: InnerMessageType
     id: str
-    from_: Optional[InnerMessageFrom] = None  # `from` is a Python keyword
+    from_: InnerMessageFrom | None = None  # `from` is a Python keyword
     body: dict[str, Any] = field(default_factory=dict)
     ts: int = 0
 
@@ -270,10 +271,11 @@ class OutboundToolStart:
     `icon` is the per-tool emoji from Hermes' agent.display.get_tool_emoji
     registry (skill_view → 📚, todo → 📋, cronjob → ⏰, etc.) — Swift
     app renders it in the bubble header. Empty string = default hammer."""
-    tool_id: str          # stable correlator across start/delta/end
-    name: str             # e.g. "bash", "read_file", "web.search"
-    args: str             # JSON-encoded args, truncated to ~2KB
-    icon: str = ""        # tool emoji, e.g. "📚" — empty = use default
+
+    tool_id: str  # stable correlator across start/delta/end
+    name: str  # e.g. "bash", "read_file", "web.search"
+    args: str  # JSON-encoded args, truncated to ~2KB
+    icon: str = ""  # tool emoji, e.g. "📚" — empty = use default
     kind: Literal["toolStart"] = "toolStart"
 
 
@@ -281,6 +283,7 @@ class OutboundToolStart:
 class OutboundToolDelta:
     """Streaming stdout/intermediate output from a long-running tool.
     Optional — fast tools (<200ms) skip directly to tool_end."""
+
     tool_id: str
     delta: str
     kind: Literal["toolDelta"] = "toolDelta"
@@ -290,9 +293,10 @@ class OutboundToolDelta:
 class OutboundToolEnd:
     """Emitted on tool completion. `result` is a short summary suitable
     for inline render; the full result lives in the agent's transcript."""
+
     tool_id: str
     status: ToolStatus
-    result: str           # short summary, truncated to ~4KB
+    result: str  # short summary, truncated to ~4KB
     duration_ms: int
     kind: Literal["toolEnd"] = "toolEnd"
 
@@ -318,7 +322,7 @@ OutboundMessage = (
 class StatusUpdate:
     msg_id: str
     status: Literal["sent", "failed"]
-    reason: Optional[str] = None
+    reason: str | None = None
 
 
 ConnectionState = Literal["disconnected", "connecting", "connected", "reconnecting"]
@@ -336,5 +340,5 @@ class ConnectionFailed:
 @dataclass
 class Chat4000Probe:
     ok: bool
-    error: Optional[str] = None
-    latency_ms: Optional[int] = None
+    error: str | None = None
+    latency_ms: int | None = None

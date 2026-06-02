@@ -12,7 +12,7 @@ Never logs plaintext message content — even at debug level.
 from __future__ import annotations
 
 import logging
-from typing import Literal, Optional
+from typing import Literal
 
 LogLevel = Literal["info", "debug"]
 
@@ -36,15 +36,15 @@ class RuntimeLogger:
         self._account_id = account_id
         self._group_id = group_id
 
-    def info(self, event: str, fields: Optional[dict] = None) -> None:
+    def info(self, event: str, fields: dict | None = None) -> None:
         self._write(logging.INFO, event, fields)
 
-    def debug(self, event: str, fields: Optional[dict] = None) -> None:
+    def debug(self, event: str, fields: dict | None = None) -> None:
         if self._level != "debug":
             return
         self._write(logging.DEBUG, event, fields)
 
-    def _write(self, level: int, event: str, fields: Optional[dict]) -> None:
+    def _write(self, level: int, event: str, fields: dict | None) -> None:
         merged: dict = {"account_id": self._account_id, "group_id": self._group_id}
         if fields:
             merged.update(fields)

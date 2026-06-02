@@ -10,18 +10,18 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
 
 
 async def run_with_reconnect(
     connect_fn: Callable[[], Awaitable[None]],
     *,
-    abort_signal: Optional[asyncio.Event] = None,
+    abort_signal: asyncio.Event | None = None,
     initial_delay_secs: float = 2.0,
     max_delay_secs: float = 60.0,
     jitter_ratio: float = 0.2,
-    on_error: Optional[Callable[[BaseException], None]] = None,
-    on_reconnect: Optional[Callable[[float], None]] = None,
+    on_error: Callable[[BaseException], None] | None = None,
+    on_reconnect: Callable[[float], None] | None = None,
     should_reconnect: Callable[[BaseException], bool] = lambda _e: True,
 ) -> None:
     retry_delay = initial_delay_secs
@@ -50,11 +50,11 @@ async def run_with_reconnect(
             retry_delay = min(retry_delay * 2, max_delay_secs)
 
 
-async def _sleep(secs: float, abort_signal: Optional[asyncio.Event]) -> None:
+async def _sleep(secs: float, abort_signal: asyncio.Event | None) -> None:
     if abort_signal is None:
         await asyncio.sleep(secs)
         return
     try:
         await asyncio.wait_for(abort_signal.wait(), timeout=secs)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass

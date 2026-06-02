@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 from .matrix.creds_store import load_bot_creds
 from .matrix.hermes_adapter import Chat4000MatrixAdapter
@@ -32,7 +31,7 @@ def validate_config(config=None) -> bool:
     return load_bot_creds("default") is not None
 
 
-def _env_enablement() -> Optional[dict]:
+def _env_enablement() -> dict | None:
     """Auto-enable when bot creds exist. The control room is the home channel, but
     we don't know its id until connect/sync — use the bot MXID as a stable id and
     seed CHAT4000_HOME_CHANNEL so Hermes' first-message prompt doesn't fire."""
@@ -54,9 +53,7 @@ def _make_adapter_class():
     from gateway.platforms.base import BasePlatformAdapter  # type: ignore[import-not-found]
 
     _SKIP = {"__dict__", "__weakref__", "__module__", "__qualname__"}
-    namespace = {
-        k: v for k, v in Chat4000MatrixAdapter.__dict__.items() if k not in _SKIP
-    }
+    namespace = {k: v for k, v in Chat4000MatrixAdapter.__dict__.items() if k not in _SKIP}
     return type("Chat4000MatrixAdapter", (BasePlatformAdapter,), namespace)
 
 
@@ -72,16 +69,19 @@ def register(ctx) -> None:
     # Hide the transient Telegram "polling conflict" warning a gateway restart
     # triggers (self-heals in seconds) — better UX than making users wait it out.
     from .logging_setup import suppress_telegram_polling_conflict
+
     suppress_telegram_polling_conflict()
 
     # Tool bubbles: route Hermes' pre/post_tool_call to the active adapter's
     # external_tool_* (chat4000.tool events). Self-filters by session.
     register_plugin_hooks(ctx)
-    analytics.set_person_properties({
-        "plugin_version": analytics.PACKAGE_VERSION,
-        "os_platform": __import__("sys").platform,
-        "transport": "matrix",
-    })
+    analytics.set_person_properties(
+        {
+            "plugin_version": analytics.PACKAGE_VERSION,
+            "os_platform": __import__("sys").platform,
+            "transport": "matrix",
+        }
+    )
 
     # chat4000 auth is the Matrix device token + E2EE; no second per-user gate.
     if "CHAT4000_ALLOW_ALL_USERS" not in os.environ:
@@ -110,4 +110,5 @@ def register(ctx) -> None:
 
     if hasattr(ctx, "register_cli"):
         from .cli import register_chat4000_cli
+
         register_chat4000_cli(ctx)

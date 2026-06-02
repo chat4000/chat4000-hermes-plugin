@@ -18,7 +18,7 @@ Dependencies are built in `start()` but can be injected for tests.
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
 
 from .creds_store import BotCreds, crypto_store_path
 from .crypto_driver import CryptoDriver, load_olm_machine
@@ -30,7 +30,7 @@ from .turns import TurnWriter
 logger = logging.getLogger(__name__)
 
 UserMessageCb = Callable[[str, str, dict], Awaitable[None]]  # (room_id, sender, content)
-CommandCb = Callable[[str, str, dict], Awaitable[None]]      # (room_id, command, content)
+CommandCb = Callable[[str, str, dict], Awaitable[None]]  # (room_id, command, content)
 
 APP_ID = "@chat4000/hermes-plugin"
 
@@ -55,9 +55,9 @@ class MatrixSession:
         self._on_user_message = on_user_message
         self._on_command = on_command
 
-        self.gateway: Optional[GatewayClient] = None
-        self.crypto: Optional[CryptoDriver] = None
-        self.rooms: Optional[RoomManager] = None
+        self.gateway: GatewayClient | None = None
+        self.crypto: CryptoDriver | None = None
+        self.rooms: RoomManager | None = None
         self._machine = None
         self._members: list[str] = []
         # room_id → set of currently-joined MXIDs (the real key-share recipients),
@@ -137,7 +137,7 @@ class MatrixSession:
         await self._maybe_track()
 
     @property
-    def _bot_id(self) -> Optional[str]:
+    def _bot_id(self) -> str | None:
         return self.gateway.user_id if self.gateway is not None else None
 
     def recipients(self, room_id: str) -> list[str]:
@@ -224,7 +224,7 @@ class MatrixSession:
             await self._mark_read(room_id, ev.get("event_id"))
             await self._on_user_message(room_id, sender, content)
 
-    async def _mark_read(self, room_id: str, event_id: Optional[str]) -> None:
+    async def _mark_read(self, room_id: str, event_id: str | None) -> None:
         """Send a public `m.read` receipt for the user's message so their client
         can render the read tick. Best-effort — never breaks message handling.
 

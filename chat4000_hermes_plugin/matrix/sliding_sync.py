@@ -15,7 +15,6 @@ version-locked and re-test on every bump.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
 
 
 def build_sync_request(*, timeline_limit: int = 20, window: int = 100) -> dict:
@@ -53,11 +52,11 @@ def build_sync_request(*, timeline_limit: int = 20, window: int = 100) -> dict:
 class ParsedSync:
     """A `sync` frame pulled apart for the crypto driver + room layer."""
 
-    pos: Optional[str]
+    pos: str | None
     to_device_events: list[dict] = field(default_factory=list)
     device_lists: dict[str, list[str]] = field(default_factory=lambda: {"changed": [], "left": []})
     one_time_key_counts: dict[str, int] = field(default_factory=dict)
-    unused_fallback_keys: Optional[list[str]] = None
+    unused_fallback_keys: list[str] | None = None
     # room_id → {"timeline": [events], "required_state": [events]}
     rooms: dict[str, dict] = field(default_factory=dict)
 

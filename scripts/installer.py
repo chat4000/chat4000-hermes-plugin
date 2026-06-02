@@ -66,7 +66,6 @@ import subprocess
 import sys
 import urllib.request
 from pathlib import Path
-from typing import Optional
 
 # ─── Constants ────────────────────────────────────────────────────────────
 
@@ -142,21 +141,41 @@ if sys.stdout.isatty():
 else:
     C_RED = C_GRN = C_YEL = C_BLU = C_MAG = C_CYN = C_DIM = C_RST = C_BOLD = ""
 
-def say(msg: str) -> None: print(f"{C_CYN}>{C_RST} {msg}")
-def ok(msg: str) -> None: print(f"{C_GRN}✓{C_RST} {msg}")
-def warn(msg: str) -> None: print(f"{C_YEL}⚠{C_RST} {msg}")
-def err(msg: str) -> None: print(f"{C_RED}✗{C_RST} {msg}", file=sys.stderr)
+
+def say(msg: str) -> None:
+    print(f"{C_CYN}>{C_RST} {msg}")
+
+
+def ok(msg: str) -> None:
+    print(f"{C_GRN}✓{C_RST} {msg}")
+
+
+def warn(msg: str) -> None:
+    print(f"{C_YEL}⚠{C_RST} {msg}")
+
+
+def err(msg: str) -> None:
+    print(f"{C_RED}✗{C_RST} {msg}", file=sys.stderr)
+
+
 def hdr(msg: str) -> None:
     line = "━" * 63
     print(f"\n{C_MAG}{line}{C_RST}\n{C_MAG}{C_BOLD}{msg}{C_RST}\n{C_MAG}{line}{C_RST}\n")
 
+
 def banner() -> None:
     print(f"\n{C_MAG}┌─────────────────────────────────────────────────────────────┐{C_RST}")
-    print(f"{C_MAG}│{C_RST}  {C_MAG}{C_BOLD}🔐 chat4000{C_RST}  ·  {C_BLU}{C_BOLD}Hermes plugin installer{C_RST}                       {C_MAG}│{C_RST}")
-    print(f"{C_MAG}│{C_RST}  {C_DIM}Native iPhone / Mac / CLI app for your Hermes agent{C_RST}        {C_MAG}│{C_RST}")
+    print(
+        f"{C_MAG}│{C_RST}  {C_MAG}{C_BOLD}🔐 chat4000{C_RST}  ·  {C_BLU}{C_BOLD}Hermes plugin installer{C_RST}                       {C_MAG}│{C_RST}"
+    )
+    print(
+        f"{C_MAG}│{C_RST}  {C_DIM}Native iPhone / Mac / CLI app for your Hermes agent{C_RST}        {C_MAG}│{C_RST}"
+    )
     print(f"{C_MAG}└─────────────────────────────────────────────────────────────┘{C_RST}\n")
 
+
 # ─── install_id (matches what the plugin will use later) ──────────────────
+
 
 def resolve_install_id() -> str:
     cfg = Path.home() / ".config" / "chat4000"
@@ -167,6 +186,7 @@ def resolve_install_id() -> str:
             if existing:
                 return existing
         import uuid
+
         new_id = str(uuid.uuid4())
         cfg.mkdir(parents=True, exist_ok=True)
         path.write_text(new_id + "\n", encoding="utf-8")
@@ -177,7 +197,9 @@ def resolve_install_id() -> str:
         return new_id
     except Exception:
         import uuid
+
         return str(uuid.uuid4())
+
 
 # ─── PostHog without the SDK (stdlib only) ────────────────────────────────
 
@@ -190,7 +212,8 @@ _TELEMETRY_DISABLED = (
     or "--no-telemetry" in sys.argv
 )
 
-def _emit(event: str, props: Optional[dict] = None) -> None:
+
+def _emit(event: str, props: dict | None = None) -> None:
     if _TELEMETRY_DISABLED:
         return
     enriched = {
@@ -241,27 +264,35 @@ def _emit(event: str, props: Optional[dict] = None) -> None:
         argv_out, skip_next = [], False
         for a in sys.argv[1:]:
             if skip_next:
-                argv_out.append("<redacted>"); skip_next = False; continue
+                argv_out.append("<redacted>")
+                skip_next = False
+                continue
             if "=" in a:
                 k = a.partition("=")[0]
                 if any(s in k.lower() for s in ("token", "key", "secret", "pass", "dsn")):
-                    argv_out.append(f"{k}=<redacted>"); continue
+                    argv_out.append(f"{k}=<redacted>")
+                    continue
             if a.startswith(("sk-", "phc_", "ghp_", "Bearer")):
-                argv_out.append("<redacted>"); continue
+                argv_out.append("<redacted>")
+                continue
             if a in ("--token", "--api-key", "--secret", "--password", "--dsn"):
-                argv_out.append(a); skip_next = True; continue
+                argv_out.append(a)
+                skip_next = True
+                continue
             argv_out.append(a)
         enriched["flags"] = argv_out
     except Exception:
         pass
     if props:
         enriched.update(props)
-    body = json.dumps({
-        "api_key": POSTHOG_API_KEY,
-        "event": event,
-        "distinct_id": resolve_install_id(),
-        "properties": enriched,
-    }).encode("utf-8")
+    body = json.dumps(
+        {
+            "api_key": POSTHOG_API_KEY,
+            "event": event,
+            "distinct_id": resolve_install_id(),
+            "properties": enriched,
+        }
+    ).encode("utf-8")
     req = urllib.request.Request(
         POSTHOG_CAPTURE_URL,
         data=body,
@@ -273,6 +304,7 @@ def _emit(event: str, props: Optional[dict] = None) -> None:
     except Exception:
         pass  # never break the install
 
+
 # ─── Sentry (stdlib envelope POST, no SDK) ────────────────────────────────
 
 
@@ -283,6 +315,7 @@ def _scrub_path(s: str) -> str:
     if home and home in s:
         s = s.replace(home, "~")
     import re as _re
+
     return _re.sub(r"/(Users|home)/[^/]+", r"/\\1/<user>", s)
 
 
@@ -290,20 +323,20 @@ def _scrub_secrets(s: str) -> str:
     if not isinstance(s, str):
         return s
     import re as _re
+
     s = _re.sub(r"sk-[A-Za-z0-9]{20,}", "[REDACTED_API_KEY]", s)
     s = _re.sub(r"phc_[A-Za-z0-9]{30,}", "[REDACTED_POSTHOG_KEY]", s)
     s = _re.sub(r"(?i)Bearer\\s+[A-Za-z0-9._-]+", "Bearer [REDACTED]", s)
     return s
 
 
-def send_sentry_envelope(exc: BaseException, *, tags: Optional[dict] = None) -> None:
+def send_sentry_envelope(exc: BaseException, *, tags: dict | None = None) -> None:
     """Post a Sentry envelope describing `exc` over plain HTTPS. Stdlib
     only — no sentry-sdk needed in the install bootstrap. Best-effort:
     never raises. Strips home paths and obvious secrets before sending."""
     if _TELEMETRY_DISABLED:
         return
     try:
-        import traceback
         import datetime
         from urllib.parse import urlparse
 
@@ -319,13 +352,15 @@ def send_sentry_envelope(exc: BaseException, *, tags: Optional[dict] = None) -> 
         while tb is not None:
             f = tb.tb_frame
             co = f.f_code
-            frames.append({
-                "filename": _scrub_path(co.co_filename),
-                "function": co.co_name,
-                "lineno": tb.tb_lineno,
-                "module": co.co_name,
-                "in_app": "installer.py" in co.co_filename,
-            })
+            frames.append(
+                {
+                    "filename": _scrub_path(co.co_filename),
+                    "function": co.co_name,
+                    "lineno": tb.tb_lineno,
+                    "module": co.co_name,
+                    "in_app": "installer.py" in co.co_filename,
+                }
+            )
             tb = tb.tb_next
 
         event = {
@@ -342,11 +377,13 @@ def send_sentry_envelope(exc: BaseException, *, tags: Optional[dict] = None) -> 
                 **(tags or {}),
             },
             "exception": {
-                "values": [{
-                    "type": type(exc).__name__,
-                    "value": _scrub_secrets(str(exc))[:500],
-                    "stacktrace": {"frames": frames},
-                }]
+                "values": [
+                    {
+                        "type": type(exc).__name__,
+                        "value": _scrub_secrets(str(exc))[:500],
+                        "stacktrace": {"frames": frames},
+                    }
+                ]
             },
             "user": {"id": resolve_install_id()},
             "sdk": {"name": "chat4000-installer", "version": "1.0.0"},
@@ -376,7 +413,8 @@ def send_sentry_envelope(exc: BaseException, *, tags: Optional[dict] = None) -> 
 
 # ─── Detection ────────────────────────────────────────────────────────────
 
-def detect_hermes() -> Optional[tuple[str, str]]:
+
+def detect_hermes() -> tuple[str, str] | None:
     """Return (venv_bin_path, layout_label) or None.
 
     Probes in order:
@@ -385,6 +423,7 @@ def detect_hermes() -> Optional[tuple[str, str]]:
          if it's a symlink/shim, resolve and use the resolved dir
       3. Known layouts in HERMES_LAYOUTS (glob-aware for Homebrew Cellar)"""
     import re
+
     # 1. Env-var overrides (project-owned). Highest priority.
     install_dir = (os.environ.get("HERMES_INSTALL_DIR") or "").strip()
     if install_dir:
@@ -456,6 +495,7 @@ def _layout_label(path: str) -> str:
         if "*" in expanded:
             # Compare with glob: replace * with regex .*
             import re as _re
+
             rx = _re.escape(expanded).replace(r"\*", "[^/]+")
             if _re.fullmatch(rx, path):
                 return label
@@ -463,7 +503,8 @@ def _layout_label(path: str) -> str:
             return label
     return "unknown"
 
-def detect_uv() -> Optional[str]:
+
+def detect_uv() -> str | None:
     p = shutil.which("uv")
     if p:
         return p
@@ -476,40 +517,64 @@ def detect_uv() -> Optional[str]:
             return str(cand)
     return None
 
+
 # ─── Install steps ────────────────────────────────────────────────────────
+
 
 def install_via_uv(uv: str, venv_python: str, ref: str) -> None:
     subprocess.run(
-        [uv, "pip", "install", "--python", venv_python,
-         "--find-links", PYVODOZEMAC_FIND_LINKS,
-         f"git+{REPO_URL}@{ref}"],
+        [
+            uv,
+            "pip",
+            "install",
+            "--python",
+            venv_python,
+            "--find-links",
+            PYVODOZEMAC_FIND_LINKS,
+            f"git+{REPO_URL}@{ref}",
+        ],
         check=True,
     )
 
+
 def install_via_pip(venv_python: str, ref: str) -> None:
     # Bootstrap pip if absent.
-    has_pip = subprocess.run(
-        [venv_python, "-c", "import pip"],
-        capture_output=True,
-    ).returncode == 0
+    has_pip = (
+        subprocess.run(
+            [venv_python, "-c", "import pip"],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
     if not has_pip:
         say("Bootstrapping pip via ensurepip…")
-        if subprocess.run(
-            [venv_python, "-m", "ensurepip", "--upgrade"],
-            capture_output=True,
-        ).returncode != 0:
+        if (
+            subprocess.run(
+                [venv_python, "-m", "ensurepip", "--upgrade"],
+                capture_output=True,
+            ).returncode
+            != 0
+        ):
             say("ensurepip failed — fetching get-pip.py")
             with urllib.request.urlopen("https://bootstrap.pypa.io/get-pip.py", timeout=20) as resp:
                 bootstrap = resp.read()
             subprocess.run([venv_python], input=bootstrap, check=True)
     subprocess.run(
-        [venv_python, "-m", "pip", "install", "--upgrade",
-         "--find-links", PYVODOZEMAC_FIND_LINKS,
-         f"git+{REPO_URL}@{ref}"],
+        [
+            venv_python,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--find-links",
+            PYVODOZEMAC_FIND_LINKS,
+            f"git+{REPO_URL}@{ref}",
+        ],
         check=True,
     )
 
-def uninstall(venv_python: str, uv: Optional[str]) -> None:
+
+def uninstall(venv_python: str, uv: str | None) -> None:
     if uv:
         subprocess.run(
             [uv, "pip", "uninstall", "--python", venv_python, "chat4000-hermes-plugin"],
@@ -521,15 +586,19 @@ def uninstall(venv_python: str, uv: Optional[str]) -> None:
             check=False,
         )
 
+
 def reset_local_state() -> None:
     state_dir = Path.home() / ".hermes" / "plugins" / "chat4000"
     if state_dir.exists():
-        warn(f"Removing {state_dir} (key + ack store) — already-paired devices will fail to decrypt until re-paired.")
+        warn(
+            f"Removing {state_dir} (key + ack store) — already-paired devices will fail to decrypt until re-paired."
+        )
         ans = input(f"{C_YEL}Continue? [y/N]:{C_RST} ").strip().lower()
         if ans not in ("y", "yes"):
             say("Reset cancelled.")
             return
         import shutil as _sh
+
         _sh.rmtree(state_dir, ignore_errors=True)
         ok(f"Removed {state_dir}")
 
@@ -551,8 +620,10 @@ def symlink_chat4000_onto_path(venv_bin: str) -> None:
             if link.is_symlink() or link.exists():
                 link.unlink()
             link.symlink_to(src)
-            ok(f"Linked {C_CYN}chat4000{C_RST} -> {link}  "
-               f"{C_DIM}(run `chat4000 status` from anywhere){C_RST}")
+            ok(
+                f"Linked {C_CYN}chat4000{C_RST} -> {link}  "
+                f"{C_DIM}(run `chat4000 status` from anywhere){C_RST}"
+            )
             if str(d) not in path_dirs:
                 warn(f"{d} isn't on your PATH — add it, or use {link} directly.")
             return
@@ -563,37 +634,50 @@ def symlink_chat4000_onto_path(venv_bin: str) -> None:
 
 # ─── Main ─────────────────────────────────────────────────────────────────
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="chat4000 Hermes plugin installer",
         add_help=True,
     )
-    parser.add_argument("--no-wizard", action="store_true",
-                        help="install only, don't pair / restart gateway")
-    parser.add_argument("--uninstall", action="store_true",
-                        help="remove the plugin from Hermes' venv")
-    parser.add_argument("--reset", action="store_true",
-                        help="wipe local key + ack store (destructive)")
-    parser.add_argument("--ref", default=DEFAULT_REF,
-                        help=(
-                            "git ref to install — a branch, tag, or commit SHA "
-                            f"(default: {DEFAULT_REF}). Use a commit SHA to test "
-                            "an unreleased build before tagging stable."
-                        ))
-    parser.add_argument("--verbose", action="store_true",
-                        help="echo every subprocess command")
-    parser.add_argument("--no-telemetry", action="store_true",
-                        help="disable PostHog + Sentry for this run")
-    parser.add_argument("--stage", action="store_true",
-                        help="pair against the chat4000 stage servers "
-                             "(sets CHAT4000_ENV=stage; inherited by the wizard/pair)")
-    parser.add_argument("--hermes-bin", default=None,
-                        metavar="PATH",
-                        help=(
-                            "Skip auto-detection and use this Hermes venv directly. "
-                            "PATH should be the directory containing `python` and "
-                            "`hermes` (e.g. /opt/homebrew/Cellar/hermes-agent/2026.5.0/venv/bin)."
-                        ))
+    parser.add_argument(
+        "--no-wizard", action="store_true", help="install only, don't pair / restart gateway"
+    )
+    parser.add_argument(
+        "--uninstall", action="store_true", help="remove the plugin from Hermes' venv"
+    )
+    parser.add_argument(
+        "--reset", action="store_true", help="wipe local key + ack store (destructive)"
+    )
+    parser.add_argument(
+        "--ref",
+        default=DEFAULT_REF,
+        help=(
+            "git ref to install — a branch, tag, or commit SHA "
+            f"(default: {DEFAULT_REF}). Use a commit SHA to test "
+            "an unreleased build before tagging stable."
+        ),
+    )
+    parser.add_argument("--verbose", action="store_true", help="echo every subprocess command")
+    parser.add_argument(
+        "--no-telemetry", action="store_true", help="disable PostHog + Sentry for this run"
+    )
+    parser.add_argument(
+        "--stage",
+        action="store_true",
+        help="pair against the chat4000 stage servers "
+        "(sets CHAT4000_ENV=stage; inherited by the wizard/pair)",
+    )
+    parser.add_argument(
+        "--hermes-bin",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Skip auto-detection and use this Hermes venv directly. "
+            "PATH should be the directory containing `python` and "
+            "`hermes` (e.g. /opt/homebrew/Cellar/hermes-agent/2026.5.0/venv/bin)."
+        ),
+    )
     args = parser.parse_args()
 
     banner()
@@ -615,11 +699,14 @@ def main() -> int:
             err(f"--hermes-bin {candidate}: no `python` found there.")
             err("Make sure the path is the directory containing `python` and `hermes`")
             err("(e.g. /opt/homebrew/Cellar/hermes-agent/2026.5.16/libexec/bin).")
-            _emit("installer_failed", {
-                "stage": "detect_hermes",
-                "error_class": "InvalidHermesBin",
-                "error_msg": f"no python at {candidate}/python",
-            })
+            _emit(
+                "installer_failed",
+                {
+                    "stage": "detect_hermes",
+                    "error_class": "InvalidHermesBin",
+                    "error_msg": f"no python at {candidate}/python",
+                },
+            )
             return 1
         venv_bin = candidate
         layout = "user-override"
@@ -633,32 +720,39 @@ def main() -> int:
             print()
             err("Hey — we couldn't find where you installed Hermes.")
             print()
-            print(f"We looked here:")
+            print("We looked here:")
             print(f"  · env vars {C_DIM}HERMES_INSTALL_DIR / HERMES_HOME / VIRTUAL_ENV{C_RST}")
             print(f"  · {C_CYN}hermes{C_RST} on PATH")
             for pattern, label in HERMES_LAYOUTS:
                 print(f"  · {pattern}  {C_DIM}({label}){C_RST}")
             print()
             print(f"{C_BOLD}Tell us where it is, or cancel:{C_RST}")
-            print(f"  · type the path to the directory containing {C_CYN}python{C_RST} and {C_CYN}hermes{C_RST}")
+            print(
+                f"  · type the path to the directory containing {C_CYN}python{C_RST} and {C_CYN}hermes{C_RST}"
+            )
             print(f"  · or press {C_CYN}Ctrl+C{C_RST} to cancel and re-run with arguments")
             print()
             print(f"{C_BOLD}Examples of a valid path:{C_RST}")
-            print(f"  /opt/homebrew/Cellar/hermes-agent/2026.5.16/libexec/bin")
-            print(f"  ~/.local/share/uv/tools/hermes-agent/bin")
-            print(f"  /opt/venvs/hermes-agent/bin")
+            print("  /opt/homebrew/Cellar/hermes-agent/2026.5.16/libexec/bin")
+            print("  ~/.local/share/uv/tools/hermes-agent/bin")
+            print("  /opt/venvs/hermes-agent/bin")
             print()
             print(f"{C_BOLD}Or re-run from your shell:{C_RST}")
             print(f"  {C_CYN}curl ... | bash -s -- --hermes-bin /your/path/to/venv/bin{C_RST}")
             print(f"  {C_CYN}curl ... | bash -s -- --help{C_RST}  {C_DIM}(see all flags){C_RST}")
             print()
             if not sys.stdin.isatty():
-                err("(non-interactive shell — cannot prompt. Re-run interactively or pass --hermes-bin.)")
-                _emit("installer_failed", {
-                    "stage": "detect_hermes",
-                    "error_class": "NotFound",
-                    "error_msg": "no hermes venv; non-interactive shell",
-                })
+                err(
+                    "(non-interactive shell — cannot prompt. Re-run interactively or pass --hermes-bin.)"
+                )
+                _emit(
+                    "installer_failed",
+                    {
+                        "stage": "detect_hermes",
+                        "error_class": "NotFound",
+                        "error_msg": "no hermes venv; non-interactive shell",
+                    },
+                )
                 return 1
             try:
                 user_input = input(f"{C_CYN}? Hermes venv-bin path:{C_RST} ").strip()
@@ -669,21 +763,27 @@ def main() -> int:
                 return 130
             if not user_input:
                 err("Empty path. Bailing.")
-                _emit("installer_failed", {
-                    "stage": "detect_hermes",
-                    "error_class": "NotFound",
-                    "error_msg": "no hermes venv; empty user input",
-                })
+                _emit(
+                    "installer_failed",
+                    {
+                        "stage": "detect_hermes",
+                        "error_class": "NotFound",
+                        "error_msg": "no hermes venv; empty user input",
+                    },
+                )
                 return 1
             candidate = str(Path(user_input).expanduser())
             if not Path(f"{candidate}/python").exists():
                 err(f"No `python` found at {candidate}. Bailing.")
-                _emit("installer_failed", {
-                    "stage": "detect_hermes",
-                    "error_class": "InvalidUserInput",
-                    "error_msg": f"no python at {candidate}/python",
-                    "user_input_path": candidate,
-                })
+                _emit(
+                    "installer_failed",
+                    {
+                        "stage": "detect_hermes",
+                        "error_class": "InvalidUserInput",
+                        "error_msg": f"no python at {candidate}/python",
+                        "user_input_path": candidate,
+                    },
+                )
                 return 1
             venv_bin = candidate
             layout = "user-input"
@@ -696,7 +796,9 @@ def main() -> int:
     if args.uninstall:
         hdr("Uninstall mode")
         uninstall(venv_python, detect_uv())
-        ok("Plugin uninstalled. Local key + state at ~/.hermes/plugins/chat4000 NOT removed (use --reset).")
+        ok(
+            "Plugin uninstalled. Local key + state at ~/.hermes/plugins/chat4000 NOT removed (use --reset)."
+        )
         return 0
 
     if args.reset:
@@ -718,36 +820,56 @@ def main() -> int:
             installer_used = "pip"
     except subprocess.CalledProcessError as exc:
         err(f"Install failed: {exc}")
-        _emit("installer_failed", {
-            "stage": "pip_install", "error_class": type(exc).__name__,
-            "error_msg": str(exc)[:200], "installer_used": uv and "uv" or "pip",
-        })
+        _emit(
+            "installer_failed",
+            {
+                "stage": "pip_install",
+                "error_class": type(exc).__name__,
+                "error_msg": str(exc)[:200],
+                "installer_used": uv and "uv" or "pip",
+            },
+        )
         return 1
     ok("Plugin installed.")
 
     # Verify import works
     check = subprocess.run(
-        [venv_python, "-c", "import chat4000_hermes_plugin; print(chat4000_hermes_plugin.__name__)"],
-        capture_output=True, text=True,
+        [
+            venv_python,
+            "-c",
+            "import chat4000_hermes_plugin; print(chat4000_hermes_plugin.__name__)",
+        ],
+        capture_output=True,
+        text=True,
     )
     if check.returncode != 0:
         err("Plugin installed but import failed:")
         err(check.stderr.strip())
-        _emit("installer_failed", {"stage": "import_check", "error_msg": check.stderr.strip()[:200]})
+        _emit(
+            "installer_failed", {"stage": "import_check", "error_msg": check.stderr.strip()[:200]}
+        )
         return 1
 
     # Read installed plugin version for the event
     ver = subprocess.run(
-        [venv_python, "-c", "from chat4000_hermes_plugin.package_info import read_package_version; print(read_package_version())"],
-        capture_output=True, text=True,
+        [
+            venv_python,
+            "-c",
+            "from chat4000_hermes_plugin.package_info import read_package_version; print(read_package_version())",
+        ],
+        capture_output=True,
+        text=True,
     )
     plugin_version = ver.stdout.strip() if ver.returncode == 0 else "unknown"
     ok(f"Installed version: {C_GRN}{plugin_version}{C_RST}")
-    _emit("installer_pkg_installed", {
-        "installer_used": installer_used,
-        "plugin_ref": args.ref,
-        "plugin_version": plugin_version,
-    })
+    _emit(
+        "installer_pkg_installed",
+        {
+            "installer_used": installer_used,
+            "plugin_ref": args.ref,
+            "plugin_version": plugin_version,
+        },
+    )
 
     # Make `chat4000` runnable from anywhere (symlink into a PATH dir) so users
     # don't need the full venv path.
@@ -768,11 +890,14 @@ def main() -> int:
         os.execv(f"{venv_bin}/chat4000", [f"{venv_bin}/chat4000", "wizard"])
     except OSError as exc:
         err(f"Could not exec wizard: {exc}")
-        _emit("installer_failed", {
-            "stage": "wizard_exec",
-            "error_class": type(exc).__name__,
-            "error_msg": str(exc)[:200],
-        })
+        _emit(
+            "installer_failed",
+            {
+                "stage": "wizard_exec",
+                "error_class": type(exc).__name__,
+                "error_msg": str(exc)[:200],
+            },
+        )
         return 1
 
 
@@ -790,10 +915,13 @@ def _entry() -> int:
         raise
     except BaseException as exc:
         err(f"Installer crashed unexpectedly: {type(exc).__name__}: {exc}")
-        _emit("installer_crashed", {
-            "error_class": type(exc).__name__,
-            "error_msg": str(exc)[:200],
-        })
+        _emit(
+            "installer_crashed",
+            {
+                "error_class": type(exc).__name__,
+                "error_msg": str(exc)[:200],
+            },
+        )
         send_sentry_envelope(exc, tags={"crash_stage": "uncaught"})
         err("Crash report sent. If this keeps happening, please open an issue:")
         err("  https://github.com/chat4000/chat4000-hermes-plugin/issues")

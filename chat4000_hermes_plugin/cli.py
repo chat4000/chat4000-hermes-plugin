@@ -52,6 +52,7 @@ def _env_file_path():
     `chat4000 pair` in a new shell would otherwise fall back to production. We
     record the selection here at pair time and read it as a fallback."""
     from .key_store import resolve_chat4000_plugin_dir
+
     return resolve_chat4000_plugin_dir() / "env"
 
 
@@ -112,8 +113,12 @@ def _build_chat4000_cli():
     import click  # type: ignore[import-not-found]
 
     @click.group(name="chat4000", help="Manage chat4000 (Matrix) onboarding and pairing")
-    @click.option("--no-telemetry", is_flag=True, default=False,
-                  help="Disable anonymous error reporting for this run.")
+    @click.option(
+        "--no-telemetry",
+        is_flag=True,
+        default=False,
+        help="Disable anonymous error reporting for this run.",
+    )
     @click.pass_context
     def chat4000(ctx_obj, no_telemetry: bool):
         if no_telemetry:
@@ -121,8 +126,12 @@ def _build_chat4000_cli():
 
     @chat4000.command("pair")
     @click.option("--account", default="default", help="Account id")
-    @click.option("--stage", is_flag=True, default=False,
-                  help="Pair against the stage servers (stgcht4.duckdns.org).")
+    @click.option(
+        "--stage",
+        is_flag=True,
+        default=False,
+        help="Pair against the stage servers (stgcht4.duckdns.org).",
+    )
     def cmd_pair(account, stage):
         """Onboard (first run) and pair a device with a 6-digit code."""
         if stage:
@@ -142,21 +151,26 @@ def _build_chat4000_cli():
     def cmd_status(account):
         """Show the bot identity and paired users."""
         import click as _c
+
         creds = load_bot_creds(account)
         users = load_known_users(account)
         if creds is None:
             _c.echo("configured: no  (run `chat4000 pair`)")
             return
-        _c.echo("\n".join([
-            f"account:     {account}",
-            f"environment: {_resolve_env()}",
-            f"bot user:    {creds.user_id}",
-            f"device:      {creds.device_id}",
-            f"gateway:     {creds.gateway_url}",
-            f"plugin_id:   {creds.plugin_id or '(none)'}",
-            f"paired users: {len(users)}" + (": " + ", ".join(users) if users else ""),
-            "configured:  yes",
-        ]))
+        _c.echo(
+            "\n".join(
+                [
+                    f"account:     {account}",
+                    f"environment: {_resolve_env()}",
+                    f"bot user:    {creds.user_id}",
+                    f"device:      {creds.device_id}",
+                    f"gateway:     {creds.gateway_url}",
+                    f"plugin_id:   {creds.plugin_id or '(none)'}",
+                    f"paired users: {len(users)}" + (": " + ", ".join(users) if users else ""),
+                    "configured:  yes",
+                ]
+            )
+        )
 
     @chat4000.command("reset")
     @click.option("--account", default="default", help="Account id")
@@ -168,6 +182,7 @@ def _build_chat4000_cli():
     def cmd_wizard():
         """Interactive install wizard."""
         from .install_wizard import main as wizard_main
+
         sys.exit(wizard_main())
 
     @chat4000.group("telemetry")
@@ -177,13 +192,16 @@ def _build_chat4000_cli():
     @telemetry_group.command("status")
     def cmd_tel_status():
         import click as _c
+
         s = get_telemetry_status()
         _c.echo(f"Telemetry: {'enabled' if s['enabled'] else 'disabled'} ({s['reason']})")
 
     @telemetry_group.command("disable")
     def cmd_tel_disable():
         import click as _c
+
         from . import analytics
+
         analytics.track("telemetry_preference_changed", {"enabled": False})
         analytics.flush()
         analytics.shutdown()
@@ -193,8 +211,10 @@ def _build_chat4000_cli():
     @telemetry_group.command("enable")
     def cmd_tel_enable():
         import click as _c
+
         set_telemetry_enabled(True)
         from . import analytics
+
         analytics.initialize_chat4000_analytics()
         analytics.track("telemetry_preference_changed", {"enabled": True})
         analytics.flush()
@@ -210,10 +230,12 @@ def register_chat4000_cli(ctx) -> None:
 def main() -> None:
     import atexit
     import signal
+
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     initialize_chat4000_telemetry()
     from . import analytics
+
     analytics.initialize_chat4000_analytics()
     # CLI commands are short-lived — flush on ANY exit path (incl. sys.exit) so
     # every tracked event actually lands before the process dies.
@@ -251,11 +273,17 @@ async def _run_pair(account: str) -> None:
     try:
         verdict = await reg.version(APP_ID, version, "production")
         if verdict.action == "force_upgrade":
-            analytics.track("version_force_upgrade", {"client_version": version, "recommended": verdict.recommended})
+            analytics.track(
+                "version_force_upgrade",
+                {"client_version": version, "recommended": verdict.recommended},
+            )
             click.echo(f"Update required (>= {verdict.recommended}). Aborting.", err=True)
             sys.exit(2)
         if verdict.action == "recommend_upgrade":
-            analytics.track("version_recommend_upgrade", {"client_version": version, "recommended": verdict.recommended})
+            analytics.track(
+                "version_recommend_upgrade",
+                {"client_version": version, "recommended": verdict.recommended},
+            )
             click.echo(f"Note: a newer version is recommended ({verdict.recommended}).")
     except RegistrarError as exc:
         analytics.track("version_check_failed", {"reason": exc.errcode, "status": exc.status})
@@ -299,8 +327,9 @@ async def _run_pair(account: str) -> None:
 
 
 def _run_reset(account: str) -> None:
-    import click  # type: ignore[import-not-found]
     from pathlib import Path
+
+    import click  # type: ignore[import-not-found]
 
     from .key_store import resolve_chat4000_plugin_dir
 
@@ -322,6 +351,7 @@ def _run_reset(account: str) -> None:
             except OSError:
                 pass
     from . import analytics
+
     analytics.track("reset_performed", {"removed_count": len(removed)})
     analytics.flush()
     if not removed:
@@ -351,13 +381,16 @@ def _ensure_plugin_enabled_in_hermes_config() -> None:
     cfg_path = None
     try:
         from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+
         cfg_path = get_hermes_home() / "config.yaml"
     except Exception:
         from pathlib import Path
+
         home = os.environ.get("HERMES_HOME", "").strip()
         cfg_path = (Path(home).expanduser() if home else Path.home() / ".hermes") / "config.yaml"
     try:
         import click  # type: ignore[import-not-found]
+
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
         if not isinstance(cfg, dict):
@@ -407,6 +440,7 @@ def _handle_cli_error(exc: BaseException) -> None:
 
     if isinstance(exc, RegistrarError):
         from . import analytics
+
         analytics.track(
             "pairing_failed",
             {"reason": exc.errcode, "status": exc.status, "env": _resolve_env()},
@@ -422,6 +456,7 @@ def _handle_cli_error(exc: BaseException) -> None:
         sys.exit(1)
 
     from .error_log import dump_chat4000_trace
+
     log_path = dump_chat4000_trace("cli", exc)
     click.echo(f"chat4000 error: {exc}", err=True)
     click.echo(f"Trace log: {log_path}", err=True)

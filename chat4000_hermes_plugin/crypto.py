@@ -22,11 +22,11 @@ import string
 from dataclasses import dataclass
 
 import nacl.bindings as _nacl_bind
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
-from cryptography.hazmat.primitives import serialization
 
 from .protocol_types import RelayWrappedKeyPayload
 
@@ -61,9 +61,7 @@ def encrypt(plaintext: bytes, key: bytes) -> tuple[str, str]:
     if len(key) != GROUP_KEY_LEN:
         raise ValueError(f"key must be {GROUP_KEY_LEN} bytes, got {len(key)}")
     nonce = secrets.token_bytes(NONCE_LEN)
-    ciphertext = _nacl_bind.crypto_aead_xchacha20poly1305_ietf_encrypt(
-        plaintext, None, nonce, key
-    )
+    ciphertext = _nacl_bind.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, None, nonce, key)
     return (
         base64.b64encode(nonce).decode("ascii"),
         base64.b64encode(ciphertext).decode("ascii"),
@@ -81,9 +79,7 @@ def decrypt(nonce_b64: str, ciphertext_b64: str, key: bytes) -> bytes | None:
     if len(nonce) != NONCE_LEN or len(key) != GROUP_KEY_LEN:
         return None
     try:
-        return _nacl_bind.crypto_aead_xchacha20poly1305_ietf_decrypt(
-            ciphertext, None, nonce, key
-        )
+        return _nacl_bind.crypto_aead_xchacha20poly1305_ietf_decrypt(ciphertext, None, nonce, key)
     except Exception:
         return None
 
@@ -100,9 +96,7 @@ def parse_group_key(input_str: str) -> bytes:
         normalized = padded.replace("-", "+").replace("_", "/")
         decoded = base64.b64decode(normalized)
         if len(decoded) != GROUP_KEY_LEN:
-            raise ValueError(
-                f"group key must decode to {GROUP_KEY_LEN} bytes, got {len(decoded)}"
-            )
+            raise ValueError(f"group key must decode to {GROUP_KEY_LEN} bytes, got {len(decoded)}")
         return decoded
     except Exception as e:
         raise ValueError(f"could not parse group key: {e}") from e
@@ -134,9 +128,7 @@ def derive_pairing_room_id(code: str) -> str:
     return h.hexdigest()
 
 
-def compute_pairing_proof(
-    normalized_code: str, a_salt_b64: str, b_pub_b64: str, side: str
-) -> str:
+def compute_pairing_proof(normalized_code: str, a_salt_b64: str, b_pub_b64: str, side: str) -> str:
     """proof = sha256(code || 0x00 || a_salt || 0x00 || b_pub || 0x00 || side)
     base64-encoded. Matches the TS/Swift/Rust impls exactly (each separator
     is a single 0x00 byte, not a delimiter character)."""
@@ -197,9 +189,7 @@ def wrap_group_key_to_joiner(
     payload (ephemeral pubkey + nonce + ciphertext)."""
     if len(group_key) != GROUP_KEY_LEN:
         raise ValueError(f"group_key must be {GROUP_KEY_LEN} bytes")
-    recipient_pub = X25519PublicKey.from_public_bytes(
-        base64.b64decode(recipient_public_key_b64)
-    )
+    recipient_pub = X25519PublicKey.from_public_bytes(base64.b64decode(recipient_public_key_b64))
     ephemeral_priv = X25519PrivateKey.generate()
     ephemeral_pub_raw = ephemeral_priv.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
@@ -224,9 +214,7 @@ def unwrap_group_key_from_initiator(
     why decryption failed) rather than raising. Caller surfaces a generic
     'pairing failed' to the user."""
     try:
-        initiator_pub = X25519PublicKey.from_public_bytes(
-            base64.b64decode(wrapped.ephemeral_pub)
-        )
+        initiator_pub = X25519PublicKey.from_public_bytes(base64.b64decode(wrapped.ephemeral_pub))
         shared = joiner_private_key.exchange(initiator_pub)
         wrap_key = _derive_wrap_key(shared)
         plaintext = decrypt(wrapped.nonce, wrapped.ciphertext, wrap_key)
@@ -244,11 +232,7 @@ def format_group_qr_url(group_key: bytes) -> str:
     """`chat4000://pair/<base64url-key>` for legacy direct-key QR codes.
     The modern flow uses pairing codes instead; this is retained for
     backwards compatibility with old QR-bearing devices."""
-    b64url = (
-        base64.urlsafe_b64encode(group_key)
-        .rstrip(b"=")
-        .decode("ascii")
-    )
+    b64url = base64.urlsafe_b64encode(group_key).rstrip(b"=").decode("ascii")
     return f"chat4000://pair/{b64url}"
 
 

@@ -7,7 +7,6 @@ and good enough for plugin diagnostics."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
