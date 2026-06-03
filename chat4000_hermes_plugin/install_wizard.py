@@ -228,17 +228,28 @@ def _clear_ready_marker() -> None:
         resolve_chat4000_ready_marker().unlink(missing_ok=True)
 
 
-def wait_for_gateway_ready(timeout: float = 180.0, est_secs: float = 90.0) -> int:
-    """Block (with a progress bar) until the gateway reports it's fully connected —
-    the adapter writes the 'ready' marker after it connects + bootstraps its rooms.
-    On timeout, warn and continue (pairing can still proceed; the gateway may yet
-    come up and will live-invite)."""
+def _ready_marker_fresh(min_mtime: float) -> bool:
+    """True only if the 'ready' marker exists AND was written at/after `min_mtime`
+    (i.e. by the gateway we just restarted, not a stale one from a prior run)."""
     from .key_store import resolve_chat4000_ready_marker
 
-    marker = resolve_chat4000_ready_marker()
+    try:
+        return resolve_chat4000_ready_marker().stat().st_mtime >= min_mtime - 1.0
+    except OSError:
+        return False
+
+
+def wait_for_gateway_ready(
+    min_mtime: float, timeout: float = 180.0, est_secs: float = 90.0
+) -> int:
+    """Block (with a progress bar) until the gateway has LOADED the chat4000 plugin
+    and it reports fully connected (auth + rooms + first sync) — the adapter writes
+    the 'ready' marker then. Only a marker written at/after `min_mtime` counts, so a
+    stale marker from a prior run can't make the bar flash. On timeout, warn and
+    continue (pairing can still proceed; the gateway may yet come up + live-invite)."""
     console.print(
-        f"[dim]{ICO_WAIT}  Connecting to chat4000 and creating your rooms — "
-        "this can take a minute or two…[/dim]"
+        f"[dim]{ICO_WAIT}  Waiting for the gateway to load the chat4000 plugin and "
+        "connect — this can take a minute or two…[/dim]"
     )
     start = time.time()
     with Progress(
@@ -249,12 +260,12 @@ def wait_for_gateway_ready(timeout: float = 180.0, est_secs: float = 90.0) -> in
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task("Bringing the gateway online", total=est_secs)
+        task = progress.add_task("Loading the chat4000 plugin", total=est_secs)
         while True:
             elapsed = time.time() - start
-            if marker.exists():
+            if _ready_marker_fresh(min_mtime):
                 progress.update(task, completed=est_secs)
-                console.print(f"[green]{ICO_OK}  Gateway is up and connected.[/green]")
+                console.print(f"[green]{ICO_OK}  Gateway is up — plugin connected.[/green]")
                 return 0
             if elapsed >= timeout:
                 progress.update(task, completed=est_secs)
@@ -271,6 +282,9 @@ def wait_for_gateway_ready(timeout: float = 180.0, est_secs: float = 90.0) -> in
 def step_gateway() -> int:
     """Step 2: (re)start the Hermes gateway and wait until it's fully connected."""
     rule(f"{ICO_ROCKET}  Bring the gateway online", 2, 3)
+    # Anything written before this restart is stale; only a 'ready' marker with
+    # mtime >= restart_t0 counts as THIS gateway loading the plugin.
+    restart_t0 = time.time()
     _clear_ready_marker()
 
     was_running = gw_is_running()
@@ -286,7 +300,7 @@ def step_gateway() -> int:
             console.print(
                 f"[green]{ICO_OK}  Gateway came back on its own (supervisor managed).[/green]"
             )
-            return wait_for_gateway_ready()
+            return wait_for_gateway_ready(restart_t0)
         console.print(f"[yellow]{ICO_INFO}  No supervisor detected — starting manually.[/yellow]")
         # Clean restart: make sure the old gateway is fully gone, then let
         # Telegram release its getUpdates poll, so the new gateway never
@@ -304,7 +318,7 @@ def step_gateway() -> int:
     rc = start_gateway_nohup()
     if rc != 0:
         return rc
-    return wait_for_gateway_ready()
+    return wait_for_gateway_ready(restart_t0)
 
 
 def start_gateway_nohup() -> int:
