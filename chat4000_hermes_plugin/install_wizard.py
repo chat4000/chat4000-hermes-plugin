@@ -79,11 +79,10 @@ def env_summary() -> dict[str, str]:
 
     plugin_version = read_package_version()
 
-    # Where the key file lives (may not exist yet)
-    from .key_store import resolve_chat4000_key_file_path
+    # v2 identity = the Matrix bot creds (minted at pair time).
+    from .matrix.creds_store import load_bot_creds
 
-    key_path = str(resolve_chat4000_key_file_path("default"))
-    key_exists = Path(key_path).exists()
+    paired = load_bot_creds("default") is not None
 
     tbl = Table.grid(padding=(0, 2))
     tbl.add_column(style="dim")
@@ -92,12 +91,8 @@ def env_summary() -> dict[str, str]:
     tbl.add_row("venv", f"[cyan]{venv_bin or '(unknown)'}[/cyan]")
     tbl.add_row("plugin", f"[green]{plugin_version}[/green]")
     tbl.add_row(
-        "key file",
-        (
-            f"[green]{key_path}[/green]"
-            if key_exists
-            else f"[yellow]{key_path} (will be minted)[/yellow]"
-        ),
+        "paired",
+        "[green]yes[/green]" if paired else "[yellow]no (will pair now)[/yellow]",
     )
     console.print(tbl)
     console.print()
@@ -106,8 +101,7 @@ def env_summary() -> dict[str, str]:
         "hermes_cmd": hermes_cmd,
         "venv_bin": venv_bin,
         "plugin_version": plugin_version,
-        "key_path": key_path,
-        "key_exists": "1" if key_exists else "",
+        "paired": "1" if paired else "",
     }
 
 

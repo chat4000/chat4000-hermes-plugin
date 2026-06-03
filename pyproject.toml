@@ -14,12 +14,8 @@ authors = [{ name = "NeonNode Ltd", email = "contact@chat4000.com" }]
 dependencies = [
   # v2 (Matrix) transport: the gateway WS client.
   "websockets>=12.0",
-  # `cryptography` powers AES-256-CTR encrypted media attachments (matrix/media.py)
-  # and is also used by the retained v1 crypto module.
+  # `cryptography` powers AES-256-CTR encrypted media attachments (matrix/media.py).
   "cryptography>=42.0",
-  # `pynacl` is used only by the retained (v1-anchor) crypto module; keep until
-  # crypto.py/protocol_types.py are removed.
-  "pynacl>=1.5.0",
   "sentry-sdk>=2.0",
   "qrcode>=7.4",
   # `click` is used by the standalone `chat4000` console script.
@@ -120,7 +116,6 @@ module = [
     "chat4000_pyvodozemac.*",
     "posthog.*",
     "qrcode.*",
-    "nacl.*",
     # `rich` (wizard UI) and `yaml` (Hermes config edit) are runtime-only deps,
     # installed in Hermes' venv, absent from the local dev/CI venv — no stubs to
     # check against here. Same category as posthog/qrcode above.
