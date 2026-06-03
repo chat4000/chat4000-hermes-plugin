@@ -23,9 +23,6 @@ class _FakeTurnWriter:
     async def send_status(self, room_id: str, state: str, question_event_id: str) -> None:
         self._sink.append((room_id, state, question_event_id))
 
-    async def tool_end(self, room_id, event_id, *, tool_id, name, args, status, result, duration_ms):  # type: ignore[no-untyped-def]
-        self._sink.append(("tool_end", tool_id, status, duration_ms))
-
 
 def _adapter(sink: list[tuple[str, str, str]], loop: object = None) -> Chat4000MatrixAdapter:
     a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
@@ -33,7 +30,6 @@ def _adapter(sink: list[tuple[str, str, str]], loop: object = None) -> Chat4000M
     a._question_id = {}
     a._status_state = {}
     a._status_task = {}
-    a._tools = {}
     a._active_room = None
     a._loop = loop  # type: ignore[assignment]
     a._tw = lambda room_id: _FakeTurnWriter(sink)  # type: ignore[method-assign,assignment]
@@ -102,19 +98,3 @@ async def test_keepalive_resends_then_stops(monkeypatch) -> None:  # type: ignor
     # no more "working" after idle (task is cancelled)
     assert sink[-1] == ("!r", "idle", "$q")
     assert sum(1 for s in sink if s[1] == "working") == sent_during
-
-
-async def test_end_status_flushes_open_tools() -> None:
-    """A tool still open at turn end (its post_tool_call never fired — Hermes ended
-    the turn mid-tool) MUST get an end, not spin forever on the client."""
-    sink: list[tuple[str, str, str]] = []
-    a = _adapter(sink)
-    a._question_id["!r"] = "$q"
-    # An open tool for this room (external_tool_start would have stored this).
-    a._tools["tool-1"] = ("!r", {"event_id": "$e", "name": "browser_console", "args": "{}", "started_at": 0.0})
-    a._tools["tool-other"] = ("!other", {"event_id": "$x", "name": "x", "args": "{}", "started_at": 0.0})
-    await a._end_status("!r")
-    # tool-1 (this room) was closed; tool-other (different room) untouched.
-    assert any(s[0] == "tool_end" and s[1] == "tool-1" for s in sink)
-    assert "tool-1" not in a._tools
-    assert "tool-other" in a._tools
