@@ -17,6 +17,7 @@ Dependencies are built in `start()` but can be injected for tests.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -68,6 +69,10 @@ class MatrixSession:
         # The set we've asked the OlmMachine to track device lists for (so we only
         # re-issue /keys/query when it actually changes).
         self._tracked: set[str] = set()
+        # Set after the FIRST sync frame is processed — the gateway is then truly
+        # receiving + crypto-warm. The 'ready' signal waits on this, not just on
+        # room bootstrap (which completes ~instantly when rooms already exist).
+        self._first_sync = asyncio.Event()
 
     # ─── lifecycle ────────────────────────────────────────────────────────
 
@@ -191,9 +196,19 @@ class MatrixSession:
 
     # ─── sync loop + routing ──────────────────────────────────────────────
 
+    async def wait_first_sync(self, timeout: float = 30.0) -> bool:
+        """Block until the first sync frame has been processed (the gateway is then
+        truly up + receiving). Returns False on timeout (caller proceeds anyway)."""
+        try:
+            await asyncio.wait_for(self._first_sync.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            return False
+
     async def _on_sync(self, frame: dict[str, Any]) -> None:
         if self.crypto is None or self.rooms is None:
             raise RuntimeError("_on_sync fired before start() built the crypto/room stack")
+        self._first_sync.set()  # gateway is receiving syncs → fully up
         parsed = await self.crypto.process_sync(frame)
         for room_id, r in parsed.rooms.items():
             self.rooms.classify_room(room_id, r.get("required_state", []))

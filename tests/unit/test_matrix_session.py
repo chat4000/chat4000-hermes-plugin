@@ -92,6 +92,11 @@ class TrackingCrypto:
     async def decrypt(self, ev, room_id):
         return self._clear
 
+    async def process_sync(self, frame):
+        from chat4000_hermes_plugin.matrix.sliding_sync import parse_sync_frame
+
+        return parse_sync_frame(frame)
+
 
 class RequestGateway:
     user_id = "@plugin:hs"
@@ -175,3 +180,16 @@ async def test_user_message_sends_read_receipt():
     # with the question event_id (for chat4000.status references).
     assert ("POST", "/_matrix/client/v3/rooms/!sess:hs/receipt/m.read/$msg1", {}) in s.gateway.requests
     assert cap == [("!sess:hs", "@u:hs", {"msgtype": "m.text", "body": "hi"}, "$msg1")]
+
+
+async def test_wait_first_sync_blocks_until_first_sync() -> None:
+    creds = BotCreds("@plugin:hs", "DEV", "tok", "wss://gw/ws")
+    s = MatrixSession(creds)
+    s.gateway = RequestGateway()
+    s.crypto = TrackingCrypto()
+    s.rooms = FakeRooms()
+    # Not synced yet → times out (wizard proceeds anyway, but marker isn't written).
+    assert await s.wait_first_sync(timeout=0.05) is False
+    # A processed sync flips it → ready.
+    await s._on_sync({"pos": "p1"})
+    assert await s.wait_first_sync(timeout=0.05) is True

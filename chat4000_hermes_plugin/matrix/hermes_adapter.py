@@ -164,6 +164,11 @@ class Chat4000MatrixAdapter:
             return False
 
         self._connected = True
+        # Wait for the first sync so 'ready' means actually-receiving — not just
+        # rooms-bootstrapped (which is ~instant when the rooms already exist, so the
+        # wizard's loading bar would just flash). Bounded so a stalled sync can't
+        # wedge the wizard forever; we proceed either way.
+        await self._session.wait_first_sync(timeout=30.0)
         self._mark_ready()  # 'gateway fully up' signal for the install wizard
         self._start_invite_watch()  # invite users who pair AFTER this point
         analytics.track("gateway_started", {"transport": "matrix"})
