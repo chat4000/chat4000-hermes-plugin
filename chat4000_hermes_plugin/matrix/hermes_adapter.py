@@ -388,8 +388,9 @@ class Chat4000MatrixAdapter:
             return
 
     async def _end_status(self, room_id: str) -> None:
-        """Close the turn: stop the keep-alive and send idle once (success/error/
-        abort) so the label clears instantly instead of waiting out the TTL."""
+        """Close the turn: flush any still-open tool bubbles (backstop for the last
+        tool), stop the keep-alive, and send idle once (success/error/abort)."""
+        await self.flush_open_tools(room_id)
         task = self._status_task.pop(room_id, None)
         if task is not None:
             task.cancel()
@@ -470,6 +471,17 @@ class Chat4000MatrixAdapter:
             result=result,
             duration_ms=duration_ms,
         )
+
+    async def flush_open_tools(self, room_id: str) -> None:
+        """Close every chat4000.tool still open for this room. Hermes fires a tool's
+        START (pre_tool_call) but can skip its END (post_tool_call) on
+        cancel/block/thread-no-return, leaving the client spinning forever. Called
+        at a round boundary (post_llm_call — a round blocks until all its tools
+        finish, so anything still open is provably orphaned) AND at turn end (the
+        backstop for the last tool). Idempotent: external_tool_end pops the tool, so
+        a real END no-ops and this stays invisible once Hermes is fixed."""
+        for tid in [t for t, (r, _m) in self._tools.items() if r == room_id]:
+            await self.external_tool_end(tid, status="done", result="")
 
     # ─── streaming reply pipeline (text + status; Hermes-contract) ────────
 

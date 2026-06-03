@@ -15,8 +15,10 @@ class FakeAdapter:
     def __init__(self, loop):
         self._connected = True
         self._loop = loop
+        self._active_room = "!r"
         self.started: list = []
         self.ended: list = []
+        self.flushed: list = []
 
     async def external_tool_start(self, name, args, icon=""):
         tid = f"tid-{name}"
@@ -25,6 +27,9 @@ class FakeAdapter:
 
     async def external_tool_end(self, tool_id, *, status="done", result=""):
         self.ended.append((tool_id, status, result))
+
+    async def flush_open_tools(self, room_id):
+        self.flushed.append(room_id)
 
 
 async def _drain():
@@ -110,19 +115,18 @@ def test_schedule_async_from_worker_thread_runs_on_loop() -> None:
         loop.close()
 
 
-async def test_orphan_sweep_closes_bubble():
+async def test_round_boundary_flushes_open_tools():
+    # post_llm_call (a round boundary) tells the adapter to flush any tool still
+    # open for the active room — the adapter closes from its OWN tool list, so the
+    # orphan-close is independent of the hook keying that used to miss task_id tools.
     a = FakeAdapter(asyncio.get_running_loop())
     h.register_active_adapter(a)
     _clear()
     h._SESSION_PLATFORM["s1"] = "chat4000"
     try:
-        h.on_pre_tool_call(tool_name="todo", args={}, task_id="s1", session_id="s1")
-        await _drain()
-        # post_tool_call never fires for intercepted tools → sweep closes it.
         h.on_post_llm_call(session_id="s1", platform="chat4000")
         await _drain()
-        assert a.ended == [("tid-todo", "done", "")]
-        assert not h._PENDING_TOOL_CALLS
+        assert a.flushed == ["!r"]  # the active room was flushed
     finally:
         h.deregister_active_adapter(a)
         _clear()

@@ -23,6 +23,9 @@ class _FakeTurnWriter:
     async def send_status(self, room_id: str, state: str, question_event_id: str) -> None:
         self._sink.append((room_id, state, question_event_id))
 
+    async def tool_end(self, room_id, event_id, *, tool_id, name, args, status, result, duration_ms):  # type: ignore[no-untyped-def]
+        self._sink.append(("tool_end", tool_id, status, duration_ms))
+
 
 def _adapter(sink: list[tuple[str, str, str]], loop: object = None) -> Chat4000MatrixAdapter:
     a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
@@ -30,6 +33,7 @@ def _adapter(sink: list[tuple[str, str, str]], loop: object = None) -> Chat4000M
     a._question_id = {}
     a._status_state = {}
     a._status_task = {}
+    a._tools = {}
     a._active_room = None
     a._loop = loop  # type: ignore[assignment]
     a._tw = lambda room_id: _FakeTurnWriter(sink)  # type: ignore[method-assign,assignment]
@@ -98,3 +102,21 @@ async def test_keepalive_resends_then_stops(monkeypatch) -> None:  # type: ignor
     # no more "working" after idle (task is cancelled)
     assert sink[-1] == ("!r", "idle", "$q")
     assert sum(1 for s in sink if s[1] == "working") == sent_during
+
+
+async def test_flush_open_tools_closes_this_rooms_tools() -> None:
+    """flush_open_tools (used at both round boundary and turn end) closes every
+    tool still open for the room, and leaves other rooms' tools alone."""
+    sink: list[tuple[str, str, str]] = []
+    a = _adapter(sink)
+    a._tools["t1"] = ("!r", {"event_id": "$e", "name": "browser_console", "args": "{}", "started_at": 0.0})
+    a._tools["t2"] = ("!r", {"event_id": "$e2", "name": "search", "args": "{}", "started_at": 0.0})
+    a._tools["t-other"] = ("!other", {"event_id": "$x", "name": "x", "args": "{}", "started_at": 0.0})
+    await a.flush_open_tools("!r")
+    closed = {s[1] for s in sink if s[0] == "tool_end"}
+    assert closed == {"t1", "t2"}  # both open tools in this room closed
+    assert "t-other" in a._tools  # a different room's tool untouched
+    # Idempotent: a second flush (or a late real END) finds nothing.
+    sink.clear()
+    await a.flush_open_tools("!r")
+    assert sink == []

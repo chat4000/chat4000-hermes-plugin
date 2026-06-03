@@ -163,25 +163,19 @@ def on_post_tool_call(
 
 
 def on_post_llm_call(*, session_id: str = "", platform: str = "", **_: object) -> None:
-    """End-of-turn orphan sweep (P1). Some tools (todo/memory/…) are intercepted
-    by the agent loop and never fire post_tool_call → their bubble would spin
-    forever. Close them with a synthetic done."""
+    """Round-boundary orphan close. Hermes can fire a tool's pre_tool_call (START)
+    but skip its post_tool_call (END) on cancel/block/thread-no-return. A round
+    BLOCKS until all its tools finish (verified in Hermes source), so by the time
+    the next LLM step's post_llm_call fires, any tool still open is provably dead —
+    close it now (the early-orphan case) instead of waiting for turn end. The
+    adapter closes from its OWN tool list (keyed by tool_id), so the fix is
+    independent of the hook keying and idempotent with a real END / a Hermes fix."""
     if not session_id or (platform or "").strip().lower() != "chat4000":
         return
-    orphans = [
-        (key, queue)
-        for key, queue in list(_PENDING_TOOL_CALLS.items())
-        if key[0] == session_id and queue
-    ]
-    for key, queue in orphans:
-        while queue:
-            adapter, tool_id = queue.pop(0)
-
-            async def _close(a: Chat4000MatrixAdapter = adapter, t: str = tool_id) -> None:
-                await a.external_tool_end(t, status="done", result="")
-
-            _schedule_async(adapter, _close())
-        _PENDING_TOOL_CALLS.pop(key, None)
+    adapter = _adapter_for_session(session_id)
+    room = getattr(adapter, "_active_room", None) if adapter is not None else None
+    if adapter is not None and room:
+        _schedule_async(adapter, adapter.flush_open_tools(room))
 
 
 def register_plugin_hooks(ctx: Any) -> None:  # noqa: ANN401  # Hermes host plugin context (untyped host object)
