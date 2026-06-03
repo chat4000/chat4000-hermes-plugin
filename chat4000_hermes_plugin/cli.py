@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .matrix.creds_store import BotCreds, crypto_store_path, load_bot_creds, save_bot_creds
+from .matrix.creds_store import crypto_store_path, load_bot_creds
 from .matrix.registrar_client import RegistrarClient, RegistrarError
 from .matrix.users_store import add_known_user, load_known_users
 from .package_info import read_package_version
@@ -145,6 +145,30 @@ def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (unty
             asyncio.run(_run_pair(account))
         except KeyboardInterrupt:
             click.echo("\nPairing cancelled.")
+        except Exception as exc:  # noqa: BLE001
+            _handle_cli_error(exc)
+
+    @chat4000.command("prepare")
+    @click.option("--account", default="default", help="Account id")
+    @click.option(
+        "--stage",
+        is_flag=True,
+        default=False,
+        help="Prepare against the stage servers (stgcht4.duckdns.org).",
+    )
+    def cmd_prepare(account: str, stage: bool) -> None:
+        """Pre-restart prep for the gateway-first install: persist the env, enable
+        the plugin in Hermes config, and self-onboard the bot identity — so the
+        gateway connects + bootstraps its rooms on the NEXT restart, before any
+        pairing. Fails fast if the registrar is unreachable."""
+        if stage:
+            os.environ["CHAT4000_ENV"] = "stage"
+        _persist_env(_resolve_env())
+        _ensure_plugin_enabled_in_hermes_config()
+        try:
+            asyncio.run(_run_prepare(account))
+        except KeyboardInterrupt:
+            click.echo("\nCancelled.")
         except Exception as exc:  # noqa: BLE001
             _handle_cli_error(exc)
 
@@ -291,23 +315,14 @@ async def _run_pair(account: str) -> None:
         analytics.track("version_check_failed", {"reason": exc.errcode, "status": exc.status})
         click.echo(f"(version check skipped: {exc})")
 
-    # Self-onboard the bot identity on first run.
-    creds = load_bot_creds(account)
+    # Self-onboard the bot identity on first run (idempotent — the gateway may
+    # already have done this at startup in the gateway-first flow).
+    from .onboarding import ensure_onboarded
+
+    creds = await ensure_onboarded(account)
     if creds is None:
-        # Uses the static DEFAULT_SERVICE_TOKEN unless CHAT4000_SERVICE_TOKEN is set.
-        onboard_code = _gen_code()
-        redeemed = await reg.self_onboard(onboard_code, device_name="hermes-plugin")
-        creds = BotCreds(
-            user_id=redeemed.user_id,
-            device_id=redeemed.device_id,
-            access_token=redeemed.access_token,
-            gateway_url=redeemed.gateway_url,
-            plugin_id=redeemed.plugin_id,
-        )
-        save_bot_creds(creds, account)
-        analytics.track("plugin_onboarded", {"env": env})
-        click.echo(f"Onboarded plugin identity: {creds.user_id}")
-        click.echo(f"Bot creds saved (gateway: {creds.gateway_url}).")
+        click.echo("Could not onboard the plugin identity (registrar unreachable?).", err=True)
+        return
 
     # Register a user pairing code.
     code = _gen_code()
@@ -331,8 +346,22 @@ async def _run_pair(account: str) -> None:
     analytics.flush()
     click.echo("")
     click.echo(f"✓ Paired {user_id}.")
-    click.echo("The running gateway will invite them + share keys on its next start.")
-    click.echo("If the gateway is running, restart it to pick up the new pairing.")
+    click.echo("A running gateway invites them + shares keys within a few seconds (no restart).")
+
+
+async def _run_prepare(account: str) -> None:
+    """Gateway-first prep: ensure the bot identity exists so the gateway connects
+    + bootstraps on its next restart, before any pairing."""
+    import click
+
+    from .onboarding import ensure_onboarded
+
+    creds = await ensure_onboarded(account)
+    if creds is None:
+        click.echo("Onboard failed — is the registrar reachable?", err=True)
+        sys.exit(1)
+    click.echo(f"Plugin identity ready: {creds.user_id}")
+    click.echo(f"Gateway: {creds.gateway_url}")
 
 
 def _run_reset(account: str) -> None:

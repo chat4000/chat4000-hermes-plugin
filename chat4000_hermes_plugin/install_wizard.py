@@ -29,6 +29,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.text import Text
 
@@ -117,9 +118,35 @@ def rule(title: str, step: int, total: int) -> None:
     )
 
 
+def _chat4000_bin(venv_bin: str) -> str:
+    return (
+        f"{venv_bin}/chat4000" if venv_bin and Path(f"{venv_bin}/chat4000").exists() else "chat4000"
+    )
+
+
+def _stage_args() -> list[str]:
+    """Pass --stage through to chat4000 subcommands when the install is staged."""
+    return ["--stage"] if os.environ.get("CHAT4000_ENV", "").strip().lower() == "stage" else []
+
+
+def step_prepare(venv_bin: str) -> int:
+    """Step 1: enable the plugin + persist env + self-onboard the bot identity, so
+    the gateway can connect on the NEXT restart (before any pairing)."""
+    rule(f"{ICO_LOCK}  Prepare the plugin", 1, 3)
+    console.print("[dim]Registering the bot identity and enabling the plugin…[/dim]")
+    args = [_chat4000_bin(venv_bin), "prepare", *_stage_args()]
+    try:
+        rc = subprocess.call(args)  # noqa: S603  # trusted fixed argv (resolved chat4000 path)
+    except KeyboardInterrupt:
+        return 130
+    if rc != 0:
+        console.print(f"[red]{ICO_ERR}  Prepare failed (exit {rc}).[/red]")
+    return rc
+
+
 def step_pair(venv_bin: str) -> int:
-    """Step 1: run the pair handshake. Returns process exit code."""
-    rule(f"{ICO_PHONE}  Pair a device", 1, 2)
+    """Step 3: run the pair handshake. Returns process exit code."""
+    rule(f"{ICO_PHONE}  Pair a device", 3, 3)
     console.print(
         "[dim]Scan the QR with the chat4000 iOS/macOS app, "
         "or paste the code into the CLI client.[/dim]"
@@ -127,11 +154,10 @@ def step_pair(venv_bin: str) -> int:
     console.print("[dim]Press Ctrl-C any time to cancel.[/dim]")
     console.print()
 
-    pair_bin = (
-        f"{venv_bin}/chat4000" if venv_bin and Path(f"{venv_bin}/chat4000").exists() else "chat4000"
-    )
     try:
-        rc = subprocess.call([pair_bin, "pair"])  # noqa: S603  # trusted fixed argv (resolved chat4000 path)
+        rc = subprocess.call(  # noqa: S603  # trusted fixed argv (resolved chat4000 path)
+            [_chat4000_bin(venv_bin), "pair", *_stage_args()]
+        )
     except KeyboardInterrupt:
         console.print(f"\n[yellow]{ICO_WAIT}  Pairing cancelled.[/yellow]")
         return 130
@@ -191,9 +217,61 @@ def _wait_until_gateway_gone(timeout: float = 10.0) -> None:
         time.sleep(0.3)
 
 
+def _clear_ready_marker() -> None:
+    """Delete the adapter's 'ready' marker so we only ever see a FRESH one written
+    by the gateway we're about to start (not a stale one from a previous run)."""
+    import contextlib
+
+    from .key_store import resolve_chat4000_ready_marker
+
+    with contextlib.suppress(OSError):
+        resolve_chat4000_ready_marker().unlink(missing_ok=True)
+
+
+def wait_for_gateway_ready(timeout: float = 180.0, est_secs: float = 90.0) -> int:
+    """Block (with a progress bar) until the gateway reports it's fully connected —
+    the adapter writes the 'ready' marker after it connects + bootstraps its rooms.
+    On timeout, warn and continue (pairing can still proceed; the gateway may yet
+    come up and will live-invite)."""
+    from .key_store import resolve_chat4000_ready_marker
+
+    marker = resolve_chat4000_ready_marker()
+    console.print(
+        f"[dim]{ICO_WAIT}  Connecting to chat4000 and creating your rooms — "
+        "this can take a minute or two…[/dim]"
+    )
+    start = time.time()
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Bringing the gateway online", total=est_secs)
+        while True:
+            elapsed = time.time() - start
+            if marker.exists():
+                progress.update(task, completed=est_secs)
+                console.print(f"[green]{ICO_OK}  Gateway is up and connected.[/green]")
+                return 0
+            if elapsed >= timeout:
+                progress.update(task, completed=est_secs)
+                console.print(
+                    f"[yellow]{ICO_INFO}  Gateway didn't report ready within "
+                    f"{int(timeout)}s — continuing. "
+                    "Check [cyan]tail -f /tmp/gateway.log[/cyan].[/yellow]"
+                )
+                return 0
+            progress.update(task, completed=min(elapsed, est_secs - 1))
+            time.sleep(1.0)
+
+
 def step_gateway() -> int:
-    """Step 2: (re)start the Hermes gateway. Returns process exit code."""
-    rule(f"{ICO_ROCKET}  Bring the gateway online", 2, 2)
+    """Step 2: (re)start the Hermes gateway and wait until it's fully connected."""
+    rule(f"{ICO_ROCKET}  Bring the gateway online", 2, 3)
+    _clear_ready_marker()
 
     was_running = gw_is_running()
     if was_running:
@@ -206,12 +284,9 @@ def step_gateway() -> int:
         console.print(f"[cyan]{ICO_WAIT}  Waiting 2 s to see if a supervisor restarts it…[/cyan]")
         if wait_for_supervisor_restart(seconds=2.0):
             console.print(
-                f"[green]{ICO_OK}  Gateway came back on its own "
-                f"(supervisor managed). No manual restart needed.[/green]"
+                f"[green]{ICO_OK}  Gateway came back on its own (supervisor managed).[/green]"
             )
-            time.sleep(1)
-            tail_log_panel()
-            return 0
+            return wait_for_gateway_ready()
         console.print(f"[yellow]{ICO_INFO}  No supervisor detected — starting manually.[/yellow]")
         # Clean restart: make sure the old gateway is fully gone, then let
         # Telegram release its getUpdates poll, so the new gateway never
@@ -226,7 +301,10 @@ def step_gateway() -> int:
     else:
         console.print(f"[cyan]{ICO_INFO}  Gateway not currently running.[/cyan]")
 
-    return start_gateway_nohup()
+    rc = start_gateway_nohup()
+    if rc != 0:
+        return rc
+    return wait_for_gateway_ready()
 
 
 def start_gateway_nohup() -> int:
@@ -333,7 +411,11 @@ def main() -> int:
         )
         return 1
 
-    rc = step_pair(env["venv_bin"])
+    venv_bin = env["venv_bin"]
+
+    # Gateway-first: prepare identity → bring the gateway fully up (with the
+    # loading bar) → THEN pair. The running gateway live-invites the paired user.
+    rc = step_prepare(venv_bin)
     if rc != 0:
         return rc
 
@@ -341,7 +423,11 @@ def main() -> int:
     if rc != 0:
         return rc
 
-    success_panel(_resolve_chat4000_cmd(env.get("venv_bin", "")))
+    rc = step_pair(venv_bin)
+    if rc != 0:
+        return rc
+
+    success_panel(_resolve_chat4000_cmd(venv_bin))
     return 0
 
 

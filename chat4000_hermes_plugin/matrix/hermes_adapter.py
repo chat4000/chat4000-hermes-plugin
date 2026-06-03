@@ -49,6 +49,10 @@ STREAM_MIN_INTERVAL_S = 0.4
 # under the client's 10s TTL (a dropped event must not expire the label mid-turn).
 STATUS_KEEPALIVE_S = 4.0
 
+# How often the running gateway re-reads known-users to invite users who paired
+# after it came up (the gateway-first flow — no restart needed).
+INVITE_WATCH_INTERVAL_S = 3.0
+
 
 @dataclass
 class _TurnState:
@@ -82,6 +86,10 @@ class Chat4000MatrixAdapter:
         self._question_id: dict[str, str] = {}
         self._status_state: dict[str, str] = {}
         self._status_task: dict[str, asyncio.Task[None]] = {}
+        # Users already invited this connection + the background watcher that
+        # live-invites anyone who pairs AFTER the gateway is up (no restart).
+        self._invited: set[str] = set()
+        self._invite_task: asyncio.Task[None] | None = None
 
         # Make this adapter discoverable by plugin_hooks (tool bubbles).
         from ..plugin_hooks import register_active_adapter
@@ -104,9 +112,22 @@ class Chat4000MatrixAdapter:
 
         creds = load_bot_creds(self._account_id)
         if creds is None:
-            logger.error("chat4000 v2: no bot creds — run `chat4000 pair` to onboard")
-            analytics.track("gateway_connect_failed", {"reason": "no_creds"})
-            return False
+            # Gateway-first: self-onboard the bot identity at startup so we can
+            # connect + bootstrap rooms BEFORE anyone pairs. Users attach later.
+            from ..onboarding import ensure_onboarded
+
+            try:
+                creds = await ensure_onboarded(self._account_id)
+            except Exception as exc:  # noqa: BLE001
+                from ..error_log import dump_chat4000_trace
+
+                logger.error("chat4000 v2: self-onboard failed: %s", exc)
+                analytics.track("gateway_connect_failed", {"reason": "onboard_failed"})
+                dump_chat4000_trace("matrix.onboard", exc)
+                return False
+            if creds is None:
+                analytics.track("gateway_connect_failed", {"reason": "no_creds"})
+                return False
 
         self._session = MatrixSession(
             creds,
@@ -131,6 +152,7 @@ class Chat4000MatrixAdapter:
                 await self._session.set_members(users)
                 for uid in users:
                     await self._session.invite_user(uid)
+            self._invited = set(users)
         except Exception as exc:  # noqa: BLE001
             # connect() boundary: report the unexpected failure once, then convert
             # to a False return so Hermes can surface "not connected" cleanly.
@@ -142,11 +164,61 @@ class Chat4000MatrixAdapter:
             return False
 
         self._connected = True
+        self._mark_ready()  # 'gateway fully up' signal for the install wizard
+        self._start_invite_watch()  # invite users who pair AFTER this point
         analytics.track("gateway_started", {"transport": "matrix"})
         return True
 
+    def _mark_ready(self) -> None:
+        from ..key_store import resolve_chat4000_ready_marker
+
+        try:
+            marker = resolve_chat4000_ready_marker()
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("ready\n", encoding="utf-8")
+        except OSError as exc:
+            logger.debug("could not write ready marker: %s", exc)
+
+    def _clear_ready(self) -> None:
+        import contextlib
+
+        from ..key_store import resolve_chat4000_ready_marker
+
+        with contextlib.suppress(OSError):
+            resolve_chat4000_ready_marker().unlink(missing_ok=True)
+
+    def _start_invite_watch(self) -> None:
+        if self._loop is None or self._invite_task is not None:
+            return
+        self._invite_task = self._loop.create_task(self._watch_known_users())
+
+    async def _watch_known_users(self) -> None:
+        """Invite users who pair AFTER the gateway is up — no restart needed. The
+        pair flow appends to known-users; we poll it and invite the newcomers."""
+        from .users_store import load_known_users
+
+        while self._connected and self._session is not None:
+            try:
+                users = load_known_users(self._account_id)
+                new = [u for u in users if u not in self._invited]
+                if new:
+                    await self._session.set_members(users)
+                    for uid in new:
+                        await self._session.invite_user(uid)
+                        self._invited.add(uid)
+                        logger.info("chat4000: live-invited newly-paired user %s", uid)
+            except Exception as exc:  # noqa: BLE001
+                from ..error_log import dump_chat4000_trace
+
+                dump_chat4000_trace("matrix.invite_watch", exc)
+            await asyncio.sleep(INVITE_WATCH_INTERVAL_S)
+
     async def disconnect(self) -> None:
         self._connected = False
+        if self._invite_task is not None:
+            self._invite_task.cancel()
+            self._invite_task = None
+        self._clear_ready()
         from ..plugin_hooks import deregister_active_adapter
 
         deregister_active_adapter(self)
@@ -363,7 +435,11 @@ class Chat4000MatrixAdapter:
         ev = await self._tw(room).tool_start(
             room, anchor, tool_id=tool_id, name=name, args=args_str, icon=icon
         )
-        self._tools[tool_id] = (room, {"name": name, "args": args_str, "event_id": ev})
+        started_at = self._loop.time() if self._loop else 0.0
+        self._tools[tool_id] = (
+            room,
+            {"name": name, "args": args_str, "event_id": ev, "started_at": started_at},
+        )
         await self._status(room, "working")
         return tool_id
 
@@ -377,6 +453,8 @@ class Chat4000MatrixAdapter:
         room, meta = entry
         if not meta.get("event_id"):
             return
+        now = self._loop.time() if self._loop else 0.0
+        duration_ms = max(0, int((now - meta.get("started_at", now)) * 1000))
         await self._tw(room).tool_end(
             room,
             meta["event_id"],
@@ -385,7 +463,7 @@ class Chat4000MatrixAdapter:
             args=meta["args"],
             status=status,
             result=result,
-            duration_ms=0,
+            duration_ms=duration_ms,
         )
 
     # ─── streaming reply pipeline (text + status; Hermes-contract) ────────

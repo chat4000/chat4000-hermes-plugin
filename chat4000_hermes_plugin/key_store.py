@@ -31,3 +31,10 @@ def resolve_hermes_state_dir() -> Path:
 
 def resolve_chat4000_plugin_dir() -> Path:
     return resolve_hermes_state_dir() / "plugins" / "chat4000"
+
+
+def resolve_chat4000_ready_marker() -> Path:
+    """Touched by the adapter once the gateway is fully connected + bootstrapped.
+    The install wizard deletes it, restarts the gateway, and polls for it to
+    reappear — the 'gateway is fully up' signal for the gateway-first flow."""
+    return resolve_chat4000_plugin_dir() / "ready"

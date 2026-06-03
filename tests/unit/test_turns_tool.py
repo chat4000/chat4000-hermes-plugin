@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from chat4000_hermes_plugin.matrix.hermes_adapter import Chat4000MatrixAdapter
 from chat4000_hermes_plugin.matrix.turns import TurnWriter
 
 
@@ -64,3 +65,27 @@ async def test_tool_end_is_mreplace_edit_with_new_content() -> None:
     assert new_tool["status"] == "done"
     assert new_tool["result"] == "ok"
     assert s["push"] is False
+
+
+class _DurLoop:
+    def time(self) -> float:
+        return 5.0
+
+
+class _CapTW:
+    def __init__(self, cap: dict[str, Any]) -> None:
+        self._cap = cap
+
+    async def tool_end(self, room, ev, *, tool_id, name, args, status, result, duration_ms) -> None:  # type: ignore[no-untyped-def]
+        self._cap["duration_ms"] = duration_ms
+
+
+async def test_tool_end_computes_real_duration_ms() -> None:
+    cap: dict[str, Any] = {}
+    a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
+    a._session = object()
+    a._loop = _DurLoop()  # type: ignore[assignment]
+    a._tools = {"t1": ("!r", {"name": "bash", "args": "{}", "event_id": "$e", "started_at": 2.0})}
+    a._tw = lambda room: _CapTW(cap)  # type: ignore[method-assign,assignment]
+    await a.external_tool_end("t1", status="done", result="ok")
+    assert cap["duration_ms"] == 3000  # (5.0 - 2.0) * 1000, not the old hardcoded 0
