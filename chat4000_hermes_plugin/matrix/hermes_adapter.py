@@ -230,12 +230,21 @@ class Chat4000MatrixAdapter:
         if event_id:
             self._question_id[room_id] = event_id
             await self._status(room_id, "thinking")
+        # handle_message RETURNS IMMEDIATELY — it spawns the agent as a background
+        # task (Hermes does this for interruption support). The turn's
+        # working/typing transitions, the 4s keep-alive, and the final idle are
+        # driven by the reply pipeline (on_final) and Hermes' turn-end hook
+        # (stop_typing), which fire when the agent ACTUALLY finishes. Do NOT end the
+        # status or clear _active_room here, or idle fires ~150ms in (before the
+        # turn starts) and every later tool/status callback no-ops.
         try:
             await self.handle_message(event)  # type: ignore[attr-defined]
-        finally:
-            self._active_room = None
-            # Safety net: guarantee the turn closes with idle even if no on_final
-            # fired (e.g. the agent errored) and regardless of Hermes' teardown.
+        except Exception as exc:  # noqa: BLE001
+            # Dispatch itself failed → no background turn will run; clear the label
+            # now and report. (A normal return means the turn is underway.)
+            from ..error_log import dump_chat4000_trace
+
+            dump_chat4000_trace("matrix.dispatch", exc)
             await self._end_status(room_id)
 
     # ─── outbound: oneshot send + typing ──────────────────────────────────
@@ -275,6 +284,7 @@ class Chat4000MatrixAdapter:
         if self._session is None or not qid:
             return
         self._status_state[room_id] = state
+        logger.debug("chat4000.status -> %s (room=%s q=%s)", state, room_id, qid)
         await self._tw(room_id).send_status(room_id, state, qid)
         self._ensure_status_keepalive(room_id)
 
@@ -295,6 +305,7 @@ class Chat4000MatrixAdapter:
                 qid = self._question_id.get(room_id)
                 if self._session is None or not qid or not state or state == "idle":
                     return
+                logger.debug("chat4000.status keep-alive %s (room=%s)", state, room_id)
                 await self._tw(room_id).send_status(room_id, state, qid)
         except asyncio.CancelledError:
             return
@@ -307,9 +318,12 @@ class Chat4000MatrixAdapter:
             task.cancel()
         qid = self._question_id.get(room_id)
         if self._session is not None and qid and self._status_state.get(room_id) != "idle":
+            logger.debug("chat4000.status -> idle (room=%s q=%s)", room_id, qid)
             await self._tw(room_id).send_status(room_id, "idle", qid)
         self._status_state.pop(room_id, None)
         self._question_id.pop(room_id, None)
+        if self._active_room == room_id:
+            self._active_room = None
 
     async def send_typing(
         self,

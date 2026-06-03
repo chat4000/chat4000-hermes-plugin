@@ -30,6 +30,7 @@ def _adapter(sink: list[tuple[str, str, str]], loop: object = None) -> Chat4000M
     a._question_id = {}
     a._status_state = {}
     a._status_task = {}
+    a._active_room = None
     a._loop = loop  # type: ignore[assignment]
     a._tw = lambda room_id: _FakeTurnWriter(sink)  # type: ignore[method-assign,assignment]
     return a
@@ -55,10 +56,12 @@ async def test_status_sends_each_transition_no_dedup() -> None:
 async def test_end_status_sends_idle_once_and_clears() -> None:
     sink: list[tuple[str, str, str]] = []
     a = _adapter(sink)
+    a._active_room = "!r"
     a._question_id["!r"] = "$q"
     await a._status("!r", "working")
     await a._end_status("!r")  # idle exactly once
     assert sink == [("!r", "working", "$q"), ("!r", "idle", "$q")]
+    assert a._active_room is None  # turn end clears the active room
     # turn fully cleared — a second end is a no-op (no question, no state)
     await a._end_status("!r")
     assert sink == [("!r", "working", "$q"), ("!r", "idle", "$q")]
