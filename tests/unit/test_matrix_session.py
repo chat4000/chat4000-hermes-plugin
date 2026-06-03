@@ -32,7 +32,7 @@ class FakeRooms:
 
 def _session(clear, captured):
     creds = BotCreds("@plugin:hs", "DEV", "tok", "wss://gw/ws")
-    async def on_msg(r, s, c):
+    async def on_msg(r, s, c, eid=""):
         captured.append(("msg", r, s, c))
     async def on_cmd(r, cmd, c):
         captured.append(("cmd", r, cmd, c))
@@ -163,14 +163,15 @@ async def test_leave_drops_recipient_and_retracks():
 async def test_user_message_sends_read_receipt():
     creds = BotCreds("@plugin:hs", "DEV", "tok", "wss://gw/ws")
     cap: list = []
-    async def on_msg(r, sender, c):
-        cap.append((r, sender, c))
+    async def on_msg(r, sender, c, eid=""):
+        cap.append((r, sender, c, eid))
     s = MatrixSession(creds, on_user_message=on_msg)
     s.gateway = RequestGateway()
     s.crypto = TrackingCrypto({"type": "m.room.message", "content": {"msgtype": "m.text", "body": "hi"}})
     s.rooms = FakeRooms()
     ev = {"type": "m.room.encrypted", "sender": "@u:hs", "event_id": "$msg1"}
     await s._handle_encrypted("!sess:hs", ev)
-    # Public read receipt POSTed for the exact inbound event, then routed to Hermes.
+    # Public read receipt POSTed for the exact inbound event, then routed to Hermes
+    # with the question event_id (for chat4000.status references).
     assert ("POST", "/_matrix/client/v3/rooms/!sess:hs/receipt/m.read/$msg1", {}) in s.gateway.requests
-    assert cap == [("!sess:hs", "@u:hs", {"msgtype": "m.text", "body": "hi"})]
+    assert cap == [("!sess:hs", "@u:hs", {"msgtype": "m.text", "body": "hi"}, "$msg1")]

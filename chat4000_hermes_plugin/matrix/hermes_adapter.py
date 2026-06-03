@@ -7,7 +7,7 @@ build_source/MessageEvent/handle_message) is unchanged from v1.
   inbound user message (session room) → handle_message → Hermes agent
   inbound chat4000.command (control)   → CommandHandler
   agent reply (streaming)              → TurnWriter (anchor + m.replace edits)
-  agent live activity                  → native m.typing (on/off)
+  agent live activity                  → chat4000.status (encrypted, refs question)
   agent tool calls                     → chat4000.tool events, via plugin_hooks
                                          (pre/post_tool_call → external_tool_*)
 
@@ -44,10 +44,10 @@ logger = logging.getLogger(__name__)
 # always flushes immediately.
 STREAM_MIN_INTERVAL_S = 0.4
 
-# Native m.typing: signal on with this timeout, re-PUT before it lapses while the
-# turn is still active. (protocol 67919b9 — chat4000.status removed.)
-TYPING_TIMEOUT_MS = 30000
-TYPING_REFRESH_S = 20.0
+# Live activity = chat4000.status (encrypted timeline event, protocol e3d9358).
+# Re-send the current state every STATUS_KEEPALIVE_S as a keep-alive; it must stay
+# under the client's 10s TTL (a dropped event must not expire the label mid-turn).
+STATUS_KEEPALIVE_S = 4.0
 
 
 @dataclass
@@ -77,13 +77,11 @@ class Chat4000MatrixAdapter:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._media: MediaClient | None = None  # built at connect
         self._connected = False
-        # Rooms with an in-flight turn — the ONLY rooms send_typing is allowed to
-        # keep typing alive. Cleared the moment a turn ends so Hermes' _keep_typing
-        # loop can't re-light native typing after the answer is delivered.
-        self._typing_on: set[str] = set()
-        # room_id → monotonic time of the last typing:true PUT (presence = typing
-        # currently on). Used to throttle refreshes inside the 30s typing timeout.
-        self._typing_at: dict[str, float] = {}
+        # Live activity (chat4000.status). Per active room: the QUESTION event_id
+        # the status references, the current state, and the 4s keep-alive task.
+        self._question_id: dict[str, str] = {}
+        self._status_state: dict[str, str] = {}
+        self._status_task: dict[str, asyncio.Task[None]] = {}
 
         # Make this adapter discoverable by plugin_hooks (tool bubbles).
         from ..plugin_hooks import register_active_adapter
@@ -166,7 +164,9 @@ class Chat4000MatrixAdapter:
         if self._commands is not None:
             await self._commands.handle(room_id, command, content)
 
-    async def _on_user_message(self, room_id: str, sender: str, content: dict[str, Any]) -> None:
+    async def _on_user_message(
+        self, room_id: str, sender: str, content: dict[str, Any], event_id: str = ""
+    ) -> None:
         from gateway.platforms.base import (
             MessageEvent,
             MessageType,
@@ -225,14 +225,18 @@ class Chat4000MatrixAdapter:
             media_types=media_types,
         )
         self._active_room = room_id
-        await self._begin_turn(room_id)  # native typing on for the life of this turn
+        # chat4000.status references the QUESTION (this inbound event). Open the
+        # turn with "thinking" so the label shows even before the model streams.
+        if event_id:
+            self._question_id[room_id] = event_id
+            await self._status(room_id, "thinking")
         try:
             await self.handle_message(event)  # type: ignore[attr-defined]
         finally:
             self._active_room = None
             # Safety net: guarantee the turn closes with idle even if no on_final
             # fired (e.g. the agent errored) and regardless of Hermes' teardown.
-            await self._end_turn(room_id)
+            await self._end_status(room_id)
 
     # ─── outbound: oneshot send + typing ──────────────────────────────────
 
@@ -255,58 +259,71 @@ class Chat4000MatrixAdapter:
         anchor = await tw.start_turn(chat_id)
         if anchor:
             await tw.stream_edit(chat_id, anchor, str(text), final=True)
-        await self._end_turn(chat_id)
+        await self._end_status(chat_id)
         return SendResult(success=True, message_id=anchor or "")
 
-    # ─── live activity (native m.typing — protocol 67919b9) ───────────────
+    # ─── live activity (chat4000.status — protocol e3d9358) ────────────────
     #
-    # chat4000.status is GONE. Liveness is a single native typing on/off for the
-    # whole active turn (no sub-state). Typing goes on when a turn begins, is
-    # refreshed before the homeserver's 30s timeout while active, and is cleared
-    # when the turn ends (final edit / error / stop_typing). _typing_on gates
-    # Hermes' ~2s keep-typing loop so it can't re-light a finished room.
+    # A fresh E2EE chat4000.status timeline event per transition, referencing the
+    # QUESTION (the user's prompt event_id). Re-sent every 4s as a keep-alive while
+    # the turn is active (no edit/overwrite); idle exactly once at turn end. The
+    # client applies a 10s TTL, so a crashed plugin can't leave a stuck label.
 
-    async def _typing(self, room_id: str, on: bool) -> None:
-        """Drive native m.typing for a room. ON re-PUTs at most every
-        TYPING_REFRESH_S (well inside the 30s timeout); OFF clears it once."""
-        if self._session is None:
+    async def _status(self, room_id: str, state: str) -> None:
+        """Send the current activity state and (re)start the keep-alive."""
+        qid = self._question_id.get(room_id)
+        if self._session is None or not qid:
             return
-        if on:
-            now = self._loop.time() if self._loop else 0.0
-            last = self._typing_at.get(room_id)
-            if last is not None and (now - last) < TYPING_REFRESH_S:
-                return  # still fresh — no need to re-PUT
-            self._typing_at[room_id] = now
-            await self._tw(room_id).set_typing(room_id, typing=True, timeout_ms=TYPING_TIMEOUT_MS)
-        elif room_id in self._typing_at:
-            self._typing_at.pop(room_id, None)
-            await self._tw(room_id).set_typing(room_id, typing=False)
+        self._status_state[room_id] = state
+        await self._tw(room_id).send_status(room_id, state, qid)
+        self._ensure_status_keepalive(room_id)
 
-    async def _begin_turn(self, room_id: str) -> None:
-        """Open a turn: allow typing refreshes and signal typing on."""
-        self._typing_on.add(room_id)
-        await self._typing(room_id, True)
+    def _ensure_status_keepalive(self, room_id: str) -> None:
+        task = self._status_task.get(room_id)
+        if task is not None and not task.done():
+            return
+        if self._loop is None:
+            return
+        self._status_task[room_id] = self._loop.create_task(self._status_keepalive(room_id))
 
-    async def _end_turn(self, room_id: str) -> None:
-        """Close a turn: stop allowing typing for this room, then clear it once."""
-        self._typing_on.discard(room_id)
-        await self._typing(room_id, False)
+    async def _status_keepalive(self, room_id: str) -> None:
+        """Re-send the current state every STATUS_KEEPALIVE_S until the turn ends."""
+        try:
+            while True:
+                await asyncio.sleep(STATUS_KEEPALIVE_S)
+                state = self._status_state.get(room_id)
+                qid = self._question_id.get(room_id)
+                if self._session is None or not qid or not state or state == "idle":
+                    return
+                await self._tw(room_id).send_status(room_id, state, qid)
+        except asyncio.CancelledError:
+            return
+
+    async def _end_status(self, room_id: str) -> None:
+        """Close the turn: stop the keep-alive and send idle once (success/error/
+        abort) so the label clears instantly instead of waiting out the TTL."""
+        task = self._status_task.pop(room_id, None)
+        if task is not None:
+            task.cancel()
+        qid = self._question_id.get(room_id)
+        if self._session is not None and qid and self._status_state.get(room_id) != "idle":
+            await self._tw(room_id).send_status(room_id, "idle", qid)
+        self._status_state.pop(room_id, None)
+        self._question_id.pop(room_id, None)
 
     async def send_typing(
         self,
         chat_id: str,
         metadata: Any = None,  # noqa: ANN401  # Hermes host metadata
     ) -> None:
-        # Hermes' keep-typing loop refreshes liveness — but only while THIS room's
-        # turn is active, so it can't re-light typing after the turn ended.
-        if self._session is not None and chat_id in self._typing_on:
-            await self._typing(chat_id, True)
+        # Native typing is removed (protocol e3d9358). Live activity is
+        # chat4000.status, driven by the reply pipeline + our own 4s keep-alive —
+        # NOT Hermes' typing loop. No-op so the host's keepalive does nothing here.
+        return None
 
     async def stop_typing(self, chat_id: str) -> None:
-        """Hermes calls this at turn teardown to clear the indicator. The base
-        class is a no-op (one-shot platforms), so we override it — the canonical
-        'turn done' signal that clears native typing."""
-        await self._end_turn(chat_id)
+        """Hermes' turn-end hook — clear the activity label (chat4000.status idle)."""
+        await self._end_status(chat_id)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": f"chat4000 ({chat_id[:8]}…)", "type": "dm", "chat_id": chat_id}
@@ -333,7 +350,7 @@ class Chat4000MatrixAdapter:
             room, anchor, tool_id=tool_id, name=name, args=args_str, icon=icon
         )
         self._tools[tool_id] = (room, {"name": name, "args": args_str, "event_id": ev})
-        await self._typing(room, True)
+        await self._status(room, "working")
         return tool_id
 
     async def external_tool_end(
@@ -365,12 +382,12 @@ class Chat4000MatrixAdapter:
 
         async def on_reasoning_stream(_p: dict[str, Any]) -> None:
             if self._active_room:
-                await self._typing(self._active_room, True)
+                await self._status(self._active_room, "thinking")
 
         async def on_assistant_message_start(_p: dict[str, Any]) -> None:
             if self._active_room:
                 await self._ensure_anchor(self._active_room)
-                await self._typing(self._active_room, True)
+                await self._status(self._active_room, "typing")
 
         async def on_partial_reply(payload: dict[str, Any]) -> None:
             room = self._active_room
@@ -400,7 +417,7 @@ class Chat4000MatrixAdapter:
                 anchor = await tw.start_turn(room)
                 if anchor:
                     await tw.stream_edit(room, anchor, text, final=True)
-            await self._end_turn(room)
+            await self._end_status(room)
 
         return {
             "on_reasoning_stream": on_reasoning_stream,

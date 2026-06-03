@@ -30,13 +30,14 @@ from .turns import TurnWriter
 
 logger = logging.getLogger(__name__)
 
-UserMessageCb = Callable[[str, str, dict[str, Any]], Awaitable[None]]  # (room_id, sender, content)
+# (room_id, sender, content, event_id) — event_id is the QUESTION event (for status)
+UserMessageCb = Callable[[str, str, dict[str, Any], str], Awaitable[None]]
 CommandCb = Callable[[str, str, dict[str, Any]], Awaitable[None]]  # (room_id, command, content)
 
 APP_ID = "@chat4000/hermes-plugin"
 
 
-async def _noop_msg(room_id: str, sender: str, content: dict[str, Any]) -> None: ...
+async def _noop_msg(room_id: str, sender: str, content: dict[str, Any], event_id: str) -> None: ...
 async def _noop_cmd(room_id: str, command: str, content: dict[str, Any]) -> None: ...
 
 
@@ -224,10 +225,12 @@ class MatrixSession:
             return
 
         # User message in a session room → mark read (so the client shows a "read"
-        # tick), then hand up to Hermes.
+        # tick), then hand up to Hermes. The event_id is the QUESTION the turn's
+        # chat4000.status events reference.
         if clear.get("type") == "m.room.message" and sender:
-            await self._mark_read(room_id, ev.get("event_id"))
-            await self._on_user_message(room_id, sender, content)
+            event_id = ev.get("event_id") or ""
+            await self._mark_read(room_id, event_id or None)
+            await self._on_user_message(room_id, sender, content, event_id)
 
     async def _mark_read(self, room_id: str, event_id: str | None) -> None:
         """Send a public `m.read` receipt for the user's message so their client

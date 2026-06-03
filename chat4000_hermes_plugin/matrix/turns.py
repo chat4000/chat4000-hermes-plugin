@@ -4,8 +4,8 @@ One agent reply = one **turn**, anchored by a single `m.room.message` event that
 edits itself via `m.replace` as text streams; the final edit carries the full
 answer and is the ONLY event with `chat4000.push: true`. Tool calls are separate
 `chat4000.tool` events linked to the anchor via `chat4000.turn_id`. Live activity
-is signaled with native Matrix typing (`m.typing` on/off) — the old
-`chat4000.status` state event was removed (protocol 67919b9).
+is a `chat4000.status` event (E2EE timeline event) carrying a multi-value state and
+referencing the QUESTION event — native `m.typing` is not used (protocol e3d9358).
 
 Push discipline (the rule that must not be gotten wrong): EVERY event of the turn
 carries `chat4000.push: false` — the anchor, every streaming edit, every tool
@@ -23,6 +23,7 @@ from .crypto_driver import CryptoDriver
 from .gateway_client import GatewayClient
 
 TOOL_MSGTYPE = "chat4000.tool"
+STATUS_EVENT_TYPE = "chat4000.status"
 
 
 class TurnWriter:
@@ -125,18 +126,19 @@ class TurnWriter:
             relates_to={"rel_type": "m.replace", "event_id": tool_event_id},
         )
 
-    # ─── live activity (native m.typing — ephemeral) ──────────────────────
+    # ─── live activity (chat4000.status — encrypted timeline event) ───────
 
-    async def set_typing(self, room_id: str, *, typing: bool, timeout_ms: int = 30000) -> None:
-        """Native Matrix typing — the live-activity signal (protocol 67919b9; the
-        old `chat4000.status` state event is gone). `typing=True` with a timeout
-        while a turn is active (refresh before it lapses); `False` clears it when
-        the turn ends. An ephemeral EDU — never persisted, carries only on/off."""
-        body: dict[str, object] = (
-            {"typing": True, "timeout": timeout_ms} if typing else {"typing": False}
-        )
-        await self._gw.request(
-            "PUT",
-            f"/_matrix/client/v3/rooms/{room_id}/typing/{self._gw.user_id}",
-            body,
+    async def send_status(self, room_id: str, state: str, question_event_id: str) -> None:
+        """Live activity label (protocol e3d9358): a fresh E2EE `chat4000.status`
+        timeline event carrying `state` (thinking|working|typing|idle), referencing
+        the QUESTION (the user's prompt event) via a cleartext m.relates_to /
+        m.reference. Never pushes; never edits a prior status (each keep-alive is a
+        new event — the client takes the latest by origin_server_ts)."""
+        await self._c.send_room_event(
+            room_id,
+            STATUS_EVENT_TYPE,
+            {"state": state},
+            self._members,
+            push=False,
+            relates_to={"rel_type": "m.reference", "event_id": question_event_id},
         )
