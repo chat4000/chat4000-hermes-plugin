@@ -84,7 +84,7 @@ class CryptoDriver:
 
         # 1. Persist crypto state (room keys land in the store here).
         async with self._lock:
-            await asyncio.to_thread(
+            decrypted_to_device = await asyncio.to_thread(
                 self._m.receive_sync_changes,
                 json.dumps(parsed.to_device_events),
                 json.dumps(parsed.device_lists),
@@ -94,6 +94,9 @@ class CryptoDriver:
                 else None,
                 parsed.pos,
             )
+        # Log room-key arrivals so we can match a UTD's missing session_id against
+        # whether its key actually reached us (A1 in the UTD diagnostics).
+        self._log_room_key_arrivals(decrypted_to_device)
 
         # 2. Store is durable → safe to advance the gateway cursor.
         if parsed.pos:
@@ -116,8 +119,26 @@ class CryptoDriver:
             # once to the sink and return None so routing skips this event.
             from ..error_log import dump_chat4000_trace
 
-            logger.warning("decrypt failed in %s: %s", room_id, exc)
-            dump_chat4000_trace("matrix.decrypt", exc, {"room_id": room_id})
+            # Log the Megolm session_id + sender so we can correlate against the
+            # SENDER's "I shared room_key session=X" log — same X => the key was
+            # sent but we never got/decrypted it (our bug); X absent on their side
+            # => they never shared it (client bug). See A1 (to_device arrivals).
+            content = event.get("content") or {}
+            logger.warning(
+                "UTD decrypt failed: room=%s megolm_session_id=%s sender=%s "
+                "sender_device=%s sender_key=%s: %s",
+                room_id,
+                content.get("session_id"),
+                event.get("sender"),
+                content.get("device_id"),
+                content.get("sender_key"),
+                exc,
+            )
+            dump_chat4000_trace(
+                "matrix.decrypt",
+                exc,
+                {"room_id": room_id, "session_id": content.get("session_id")},
+            )
             return None
 
     # ─── outbound ─────────────────────────────────────────────────────────
@@ -183,7 +204,44 @@ class CryptoDriver:
 
     async def _send_and_mark(self, req_json: str) -> None:
         r = json.loads(req_json)
+        kind = r.get("kind")
+        # A3: prove the plugin publishes its one-time keys — without them no device
+        # can build an Olm channel to us, which guarantees inbound UTD.
+        if kind == "keys_upload":
+            otk = (r.get("body") or {}).get("one_time_keys") or {}
+            logger.info("keys_upload: %d one-time keys", len(otk) if isinstance(otk, dict) else 0)
+        elif kind in ("keys_claim", "keys_query"):
+            logger.info("crypto request: %s -> %s", kind, r.get("path"))
         status, body = await self._gw.request(r["method"], r["path"], r.get("body"))
         await asyncio.to_thread(
-            self._m.mark_request_as_sent, r["id"], r["kind"], status, json.dumps(body)
+            self._m.mark_request_as_sent, r["id"], kind, status, json.dumps(body)
         )
+
+    def _log_room_key_arrivals(self, decrypted_to_device_json: str) -> None:
+        """A1: log incoming to-device events — especially m.room_key (the keys other
+        devices share with us). Best-effort + defensive about the binding's shape."""
+        try:
+            events = json.loads(decrypted_to_device_json or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(events, list) or not events:
+            return
+        types = [
+            str((e or {}).get("type") or (e or {}).get("event_type") or "?")
+            for e in events
+            if isinstance(e, dict)
+        ]
+        logger.info("to_device batch processed: %d events types=%s", len(events), types)
+        for ev in events:
+            if not isinstance(ev, dict) or "room_key" not in str(
+                ev.get("type") or ev.get("event_type") or ""
+            ):
+                continue
+            raw = ev.get("content")
+            content = raw if isinstance(raw, dict) else ev
+            logger.info(
+                "  -> room_key megolm_session_id=%s room=%s sender_key=%s",
+                content.get("session_id"),
+                content.get("room_id"),
+                content.get("sender_key"),
+            )
