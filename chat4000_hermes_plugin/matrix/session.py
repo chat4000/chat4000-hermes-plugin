@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -36,6 +37,12 @@ UserMessageCb = Callable[[str, str, dict[str, Any], str], Awaitable[None]]
 CommandCb = Callable[[str, str, dict[str, Any]], Awaitable[None]]  # (room_id, command, content)
 
 APP_ID = "@chat4000/hermes-plugin"
+
+# A message can arrive a couple seconds BEFORE its room key (the key rides a
+# separate to-device channel). Instead of dropping the UTD, buffer it and retry
+# after each sync — once the key lands the message decrypts. Give up after the TTL.
+UTD_BUFFER_TTL_S = 30.0
+UTD_BUFFER_MAX = 50
 
 
 async def _noop_msg(room_id: str, sender: str, content: dict[str, Any], event_id: str) -> None: ...
@@ -73,6 +80,9 @@ class MatrixSession:
         # receiving + crypto-warm. The 'ready' signal waits on this, not just on
         # room bootstrap (which completes ~instantly when rooms already exist).
         self._first_sync = asyncio.Event()
+        # Events that couldn't be decrypted yet (key not arrived) → retried each
+        # sync. Each entry is (room_id, event, first_seen_monotonic).
+        self._utd_buffer: list[tuple[str, dict[str, Any], float]] = []
 
     # ─── lifecycle ────────────────────────────────────────────────────────
 
@@ -210,6 +220,8 @@ class MatrixSession:
             raise RuntimeError("_on_sync fired before start() built the crypto/room stack")
         self._first_sync.set()  # gateway is receiving syncs → fully up
         parsed = await self.crypto.process_sync(frame)
+        # This sync may have imported a room key a buffered message was waiting on.
+        await self._retry_utd_buffer()
         for room_id, r in parsed.rooms.items():
             self.rooms.classify_room(room_id, r.get("required_state", []))
             # Learn who's actually in the room → drives key-share recipients +
@@ -227,7 +239,17 @@ class MatrixSession:
             raise RuntimeError("_handle_encrypted fired before start() built the crypto stack")
         clear = await self.crypto.decrypt(ev, room_id)
         if clear is None:
+            # Key probably just hasn't arrived yet — buffer and retry next sync
+            # instead of dropping the user's message on the floor.
+            self._buffer_utd(room_id, ev)
             return
+        await self._dispatch_clear(room_id, ev, clear)
+
+    async def _dispatch_clear(
+        self, room_id: str, ev: dict[str, Any], clear: dict[str, Any]
+    ) -> None:
+        """Route a decrypted event: control command, or user message → Hermes."""
+        sender = ev.get("sender")
         content = clear.get("content") or {}
         msgtype = content.get("msgtype")
 
@@ -246,6 +268,42 @@ class MatrixSession:
             event_id = ev.get("event_id") or ""
             await self._mark_read(room_id, event_id or None)
             await self._on_user_message(room_id, sender, content, event_id)
+
+    def _buffer_utd(self, room_id: str, ev: dict[str, Any]) -> None:
+        eid = ev.get("event_id")
+        if not eid or any(e[1].get("event_id") == eid for e in self._utd_buffer):
+            return
+        if len(self._utd_buffer) >= UTD_BUFFER_MAX:
+            self._utd_buffer.pop(0)  # drop the oldest under pressure
+        self._utd_buffer.append((room_id, ev, time.monotonic()))
+
+    async def _retry_utd_buffer(self) -> None:
+        """Re-decrypt buffered events — the room key may have just arrived. Dispatch
+        the recovered ones; expire entries older than the TTL."""
+        if not self._utd_buffer or self.crypto is None:
+            return
+        now = time.monotonic()
+        still: list[tuple[str, dict[str, Any], float]] = []
+        for room_id, ev, t0 in self._utd_buffer:
+            clear = await self.crypto.decrypt(ev, room_id)
+            if clear is not None:
+                logger.info(
+                    "UTD recovered: room=%s event=%s (key arrived late)",
+                    room_id,
+                    ev.get("event_id"),
+                )
+                await self._dispatch_clear(room_id, ev, clear)
+            elif now - t0 < UTD_BUFFER_TTL_S:
+                still.append((room_id, ev, t0))
+            else:
+                logger.warning(
+                    "UTD gave up after %.0fs: room=%s event=%s session=%s",
+                    UTD_BUFFER_TTL_S,
+                    room_id,
+                    ev.get("event_id"),
+                    (ev.get("content") or {}).get("session_id"),
+                )
+        self._utd_buffer = still
 
     async def _mark_read(self, room_id: str, event_id: str | None) -> None:
         """Send a public `m.read` receipt for the user's message so their client
