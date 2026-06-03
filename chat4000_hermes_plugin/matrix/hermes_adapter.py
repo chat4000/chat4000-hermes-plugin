@@ -388,8 +388,16 @@ class Chat4000MatrixAdapter:
             return
 
     async def _end_status(self, room_id: str) -> None:
-        """Close the turn: stop the keep-alive and send idle once (success/error/
-        abort) so the label clears instantly instead of waiting out the TTL."""
+        """Close the turn: flush any still-open tool bubbles, stop the keep-alive,
+        and send idle once (success/error/abort) so the label clears instantly."""
+        # EVERY started tool must get an end. Hermes can end the turn while the last
+        # tool is still in flight (its post_tool_call never fires) → close any tool
+        # left open for this room here, with its real elapsed duration. Idempotent:
+        # a late post_tool_call finds the entry already gone and no-ops.
+        open_tool_ids = [tid for tid, (r, _meta) in self._tools.items() if r == room_id]
+        for tid in open_tool_ids:
+            await self.external_tool_end(tid, status="done", result="")
+
         task = self._status_task.pop(room_id, None)
         if task is not None:
             task.cancel()
