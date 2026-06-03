@@ -398,10 +398,15 @@ class Chat4000MatrixAdapter:
         if self._session is not None and qid and self._status_state.get(room_id) != "idle":
             logger.debug("chat4000.status -> idle (room=%s q=%s)", room_id, qid)
             await self._tw(room_id).send_status(room_id, "idle", qid)
-        self._status_state.pop(room_id, None)
-        self._question_id.pop(room_id, None)
-        if self._active_room == room_id:
-            self._active_room = None
+            self._status_state[room_id] = "idle"  # record (dedupe a second end), don't drop
+        # Deliberately DO NOT clear _active_room / _question_id here. A rapid /
+        # interrupting follow-up message may have ALREADY claimed this room (set its
+        # own _active_room + question_id); clearing on the OLD turn's teardown would
+        # wipe the NEW turn's context → it would run with no thinking and no tool
+        # bubbles (the answer still ships via send(), which is why you'd see a reply
+        # with no activity). _on_user_message always overwrites with the latest
+        # turn, and the reply-pipeline callbacks re-arm the keep-alive, so the
+        # latest turn's status self-heals.
 
     async def send_typing(
         self,

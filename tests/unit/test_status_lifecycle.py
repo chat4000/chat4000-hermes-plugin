@@ -57,7 +57,7 @@ async def test_status_sends_each_transition_no_dedup() -> None:
     assert sink == [("!r", "thinking", "$q"), ("!r", "working", "$q"), ("!r", "working", "$q")]
 
 
-async def test_end_status_sends_idle_once_and_clears() -> None:
+async def test_end_status_sends_idle_once_and_keeps_context() -> None:
     sink: list[tuple[str, str, str]] = []
     a = _adapter(sink)
     a._active_room = "!r"
@@ -65,8 +65,11 @@ async def test_end_status_sends_idle_once_and_clears() -> None:
     await a._status("!r", "working")
     await a._end_status("!r")  # idle exactly once
     assert sink == [("!r", "working", "$q"), ("!r", "idle", "$q")]
-    assert a._active_room is None  # turn end clears the active room
-    # turn fully cleared — a second end is a no-op (no question, no state)
+    # Context is NOT wiped on end — a rapid follow-up turn that already claimed this
+    # room must keep its _active_room + question_id (else it shows no thinking/tools).
+    assert a._active_room == "!r"
+    assert a._question_id["!r"] == "$q"
+    # Idempotent: a second end re-sends nothing (status already idle).
     await a._end_status("!r")
     assert sink == [("!r", "working", "$q"), ("!r", "idle", "$q")]
 
@@ -120,3 +123,21 @@ async def test_flush_open_tools_closes_this_rooms_tools() -> None:
     sink.clear()
     await a.flush_open_tools("!r")
     assert sink == []
+
+
+async def test_followup_turn_status_survives_interrupted_turn_end() -> None:
+    """Rapid follow-up: turn2 claims the room, then the interrupted turn1's
+    _end_status fires. turn2's context must survive so its later reasoning/tool
+    callbacks still emit (the no-thinking/no-tools bug)."""
+    sink: list[tuple[str, str, str]] = []
+    a = _adapter(sink)
+    a._active_room = "!r"
+    a._question_id["!r"] = "$q2"  # turn2's question now owns the room
+    await a._status("!r", "thinking")  # turn2 opened
+    sink.clear()
+    await a._end_status("!r")  # turn1 (interrupted) tears down
+    # turn2's context is intact → a later turn2 callback still emits status…
+    await a._status("!r", "working")
+    assert ("!r", "working", "$q2") in sink
+    # …and external_tool_start (uses _active_room) would still have a room.
+    assert a._active_room == "!r"
