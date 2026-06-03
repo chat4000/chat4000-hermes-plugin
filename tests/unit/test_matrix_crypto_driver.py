@@ -19,6 +19,7 @@ class FakeMachine:
 
     def receive_sync_changes(self, td, dl, otk, fallback=None, nb=None):
         self.log.append("recv_sync_changes")
+        self.last_nb = nb  # next_batch = the to-device cursor (atomic with keys)
         return "[]"
 
     def outgoing_requests(self):
@@ -51,8 +52,8 @@ class FakeGateway:
         self.user_id = "@plugin:hs"
         self.requests: list = []
 
-    async def ack_sync(self, pos):
-        self.log.append(("ack", pos))
+    async def ack_sync(self, pos, to_device_pos=None):
+        self.log.append(("ack", pos, to_device_pos))
 
     async def request(self, method, path, body=None):
         self.log.append(("req", method, path))
@@ -77,6 +78,35 @@ async def test_no_ack_without_pos():
     d = CryptoDriver(FakeMachine(log), FakeGateway(log))
     await d.process_sync({"extensions": {}})  # no pos
     assert not any(isinstance(e, tuple) and e[0] == "ack" for e in log)
+
+
+async def test_to_device_cursor_persisted_atomically_and_acked():
+    """The to-device cursor is written in the SAME store write as the keys (as the
+    next_batch arg) and acked AFTER — never the cursor without its keys."""
+    log: list = []
+    m = FakeMachine(log)
+    d = CryptoDriver(m, FakeGateway(log))
+    await d.process_sync(
+        {"pos": "p1", "to_device_pos": "td7", "extensions": {"to_device": {"events": []}}}
+    )
+    # persisted atomically with the keys (the receive_sync_changes next_batch):
+    assert m.last_nb == "td7"
+    # acked, carrying the to-device cursor, AFTER the store write:
+    recv_i = log.index("recv_sync_changes")
+    ack_i, ack = next((i, e) for i, e in enumerate(log) if isinstance(e, tuple) and e[0] == "ack")
+    assert recv_i < ack_i
+    assert ack == ("ack", "p1", "td7")
+
+
+async def test_frame_with_no_to_device_passes_none_cursor():
+    """A frame with no to-device section advances no to-device cursor (None → the
+    gateway leaves it unchanged / carries forward)."""
+    log: list = []
+    m = FakeMachine(log)
+    d = CryptoDriver(m, FakeGateway(log))
+    await d.process_sync({"pos": "p2", "extensions": {}})
+    assert m.last_nb is None
+    assert ("ack", "p2", None) in log
 
 
 async def test_send_room_event_splices_cleartext_envelope():

@@ -97,7 +97,12 @@ class GatewayClient:
         # Sliding-sync state the CLIENT owns (the gateway keeps pos only in
         # memory for the socket; on reconnect we resend our last persisted pos).
         self._sync_body: dict[str, Any] | None = None
+        # Two independent upstream cursors (protocol D): the room cursor (`pos`)
+        # and the to-device cursor. The to-device cursor carries the delete-on-read
+        # Megolm room keys — it is NEVER derived from `pos`; we persist + ack + resume
+        # it separately, and carry the last value forward on frames with none.
         self._last_persisted_pos: str | None = None
+        self._last_persisted_to_device_pos: str | None = None
 
         self.user_id: str | None = None
         self.device_id: str | None = None
@@ -155,20 +160,35 @@ class GatewayClient:
         persisted pos if we have one."""
         self._sync_body = body
         frame: dict[str, Any] = {"t": "sync_start", "body": body}
+        # Resume BOTH cursors from durable storage; omit either only on a genuinely
+        # fresh sync. The gateway keeps cursors only in memory for the socket, so the
+        # device is the source of truth for both on reconnect.
         if self._last_persisted_pos is not None:
             frame["pos"] = self._last_persisted_pos
+        if self._last_persisted_to_device_pos is not None:
+            frame["to_device_pos"] = self._last_persisted_to_device_pos
         await self._send(frame)
 
     async def update_sync(self, body: dict[str, Any]) -> None:
         self._sync_body = body
         await self._send({"t": "sync_update", "body": body})
 
-    async def ack_sync(self, pos: str) -> None:
-        """Tell the gateway the batch up to `pos` is durably persisted, so it may
-        advance the upstream cursor. CALL ONLY AFTER the crypto store is written
-        (anti-UTD). Also records `pos` for reconnect resume."""
+    async def ack_sync(self, pos: str, to_device_pos: str | None = None) -> None:
+        """Tell the gateway the acked frame is durably persisted (timeline up to
+        `pos` AND its to-device room keys + crypto state, with the to-device cursor
+        at `to_device_pos`), so it may advance BOTH upstream cursors. CALL ONLY AFTER
+        the crypto store is written (anti-UTD): never ack a to_device_pos whose keys
+        aren't durable. Records both for reconnect resume; carries the last
+        to_device_pos forward on frames that had no to-device section."""
         self._last_persisted_pos = pos
-        await self._send({"t": "sync_ack", "pos": pos})
+        frame: dict[str, Any] = {"t": "sync_ack", "pos": pos}
+        if to_device_pos is not None:
+            self._last_persisted_to_device_pos = to_device_pos
+        # Send the latest to-device cursor on durable storage (carry-forward); omit
+        # only if we've never received one (absent → gateway leaves it unchanged).
+        if self._last_persisted_to_device_pos is not None:
+            frame["to_device_pos"] = self._last_persisted_to_device_pos
+        await self._send(frame)
 
     # ─── run loop ─────────────────────────────────────────────────────────
 

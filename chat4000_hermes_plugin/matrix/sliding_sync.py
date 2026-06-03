@@ -54,6 +54,10 @@ class ParsedSync:
     """A `sync` frame pulled apart for the crypto driver + room layer."""
 
     pos: str | None
+    # The to-device cursor for this batch (top-level, lifted by the gateway from
+    # extensions.to_device.next_batch). Present only when the batch advanced the
+    # to-device cursor. Persisted + acked separately from `pos` (D — two cursors).
+    to_device_pos: str | None = None
     to_device_events: list[dict[str, Any]] = field(default_factory=list)
     device_lists: dict[str, list[str]] = field(default_factory=lambda: {"changed": [], "left": []})
     one_time_key_counts: dict[str, int] = field(default_factory=dict)
@@ -96,6 +100,7 @@ def parse_sync_frame(frame: dict[str, Any]) -> ParsedSync:
 
     return ParsedSync(
         pos=pos,
+        to_device_pos=frame.get("to_device_pos"),
         to_device_events=list(to_device),
         device_lists=device_lists,
         one_time_key_counts=one_time_key_counts,

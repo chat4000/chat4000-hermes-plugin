@@ -82,7 +82,11 @@ class CryptoDriver:
         decrypt + dispatch the timeline."""
         parsed = parse_sync_frame(frame)
 
-        # 1. Persist crypto state (room keys land in the store here).
+        # 1. Persist crypto state (room keys land in the store here). The to-device
+        #    cursor is written as the store's next_batch in this SAME atomic write,
+        #    so the cursor and the keys it acknowledges land together — never the
+        #    cursor without its keys (which would let the homeserver delete keys we
+        #    hadn't saved → permanent UTD). (protocol D, two cursors.)
         async with self._lock:
             decrypted_to_device = await asyncio.to_thread(
                 self._m.receive_sync_changes,
@@ -92,15 +96,17 @@ class CryptoDriver:
                 json.dumps(parsed.unused_fallback_keys)
                 if parsed.unused_fallback_keys is not None
                 else None,
-                parsed.pos,
+                parsed.to_device_pos,
             )
         # Log room-key arrivals so we can match a UTD's missing session_id against
         # whether its key actually reached us (A1 in the UTD diagnostics).
         self._log_room_key_arrivals(decrypted_to_device)
 
-        # 2. Store is durable → safe to advance the gateway cursor.
+        # 2. Store is durable → safe to advance BOTH upstream cursors. We ack the
+        #    to-device cursor only AFTER its keys are persisted (anti-UTD); ack_sync
+        #    carries the last to_device_pos forward on frames with no to-device.
         if parsed.pos:
-            await self._gw.ack_sync(parsed.pos)
+            await self._gw.ack_sync(parsed.pos, parsed.to_device_pos)
 
         # 3. Push any crypto requests the machine now wants made.
         await self.drain_outgoing()
