@@ -89,6 +89,9 @@ class RoomManager:
         )
         self._check(status, body, f"create_{kind}_room")
         room_id: str = body["room_id"]
+        logger.debug(
+            "created %s room id=%s (encryption + room_kind set in initial_state)", kind, room_id
+        )
         if self.space_id:
             await self._add_space_child(room_id)
         return room_id
@@ -96,6 +99,7 @@ class RoomManager:
     # ─── membership ───────────────────────────────────────────────────────
 
     async def invite_user(self, room_id: str, user_id: str) -> None:
+        logger.debug("inviting user=%s to room=%s", user_id, room_id)
         status, body = await self.gateway.request(
             "POST", f"/_matrix/client/v3/rooms/{room_id}/invite", {"user_id": user_id}
         )

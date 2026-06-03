@@ -77,12 +77,30 @@ class CommandHandler:
     # ─── handlers ─────────────────────────────────────────────────────────
 
     async def _session_new(self, content: dict[str, Any]) -> None:
+        import time
+
         title = content.get("title") or "session"
         agent_id = content.get("agent_id") or "main"
+        t0 = time.monotonic()
+        logger.debug("session.new: creating room title=%r agent_id=%s", title, agent_id)
         room_id = await self._rooms.create_session_room(title, agent_id)
+        t_created = time.monotonic()
         for uid in self._s.members:
             await self._rooms.invite_user(room_id, uid)
+        t_invited = time.monotonic()
+        logger.debug(
+            "session.new: room=%s created in %.0fms, invited %d member(s) in %.0fms",
+            room_id,
+            (t_created - t0) * 1000,
+            len(self._s.members),
+            (t_invited - t_created) * 1000,
+        )
         await self._reply("session.new", {"ok": True, "room_id": room_id})
+        logger.debug(
+            "session.new: replied room_id=%s (total %.0fms)",
+            room_id,
+            (time.monotonic() - t0) * 1000,
+        )
 
     async def _session_rename(self, content: dict[str, Any]) -> None:
         room_id = content.get("room_id")

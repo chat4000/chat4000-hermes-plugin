@@ -19,8 +19,12 @@ EDU (never persisted, no content) sent straight over the gateway.
 
 from __future__ import annotations
 
+import logging
+
 from .crypto_driver import CryptoDriver
 from .gateway_client import GatewayClient
+
+logger = logging.getLogger(__name__)
 
 TOOL_MSGTYPE = "chat4000.tool"
 STATUS_EVENT_TYPE = "chat4000.status"
@@ -134,6 +138,9 @@ class TurnWriter:
         the QUESTION (the user's prompt event) via a cleartext m.relates_to /
         m.reference. Never pushes; never edits a prior status (each keep-alive is a
         new event — the client takes the latest by origin_server_ts)."""
+        # Log every status write so cadence (hold active for the whole turn, idle
+        # only at true turn-end) is auditable from the plugin side.
+        logger.debug("status -> state=%s room=%s question=%s", state, room_id, question_event_id)
         await self._c.send_room_event(
             room_id,
             STATUS_EVENT_TYPE,

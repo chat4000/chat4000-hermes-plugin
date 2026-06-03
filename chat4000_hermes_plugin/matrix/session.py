@@ -225,15 +225,42 @@ class MatrixSession:
             return  # ignore our own echoes
         if self.crypto is None:
             raise RuntimeError("_handle_encrypted fired before start() built the crypto stack")
+        logger.debug(
+            "incoming encrypted event room=%s event_id=%s sender=%s",
+            room_id,
+            ev.get("event_id"),
+            sender,
+        )
         clear = await self.crypto.decrypt(ev, room_id)
         if clear is None:
+            # The room key likely just hasn't arrived yet (separate to-device
+            # channel) — we currently DROP it with no retry (the inbound key-race
+            # bug). Log what was lost so the gap is visible until buffer-retry lands.
+            logger.debug(
+                "DROP undecryptable event room=%s event_id=%s session=%s sender=%s "
+                "(key not arrived; no retry)",
+                room_id,
+                ev.get("event_id"),
+                (ev.get("content") or {}).get("session_id"),
+                sender,
+            )
             return
         content = clear.get("content") or {}
         msgtype = content.get("msgtype")
+        logger.debug(
+            "decrypted room=%s event_id=%s type=%s msgtype=%s",
+            room_id,
+            ev.get("event_id"),
+            clear.get("type"),
+            msgtype,
+        )
 
         # Command boundary (E): only honor chat4000.command in the control room.
         if msgtype == "chat4000.command":
             if self.rooms is not None and room_id == self.rooms.control_room_id:
+                logger.debug(
+                    "routing command=%s room=%s (control)", content.get("command"), room_id
+                )
                 await self._on_command(room_id, content.get("command", ""), content)
             else:
                 logger.info("ignoring chat4000.command outside control room (%s)", room_id)
@@ -244,6 +271,12 @@ class MatrixSession:
         # chat4000.status events reference.
         if clear.get("type") == "m.room.message" and sender:
             event_id = ev.get("event_id") or ""
+            logger.debug(
+                "routing user message room=%s sender=%s event_id=%s -> hermes",
+                room_id,
+                sender,
+                event_id,
+            )
             await self._mark_read(room_id, event_id or None)
             await self._on_user_message(room_id, sender, content, event_id)
 

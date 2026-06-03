@@ -21,12 +21,22 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import os
 from pathlib import Path
 
 from .key_store import resolve_chat4000_plugin_dir
 
 _LOG_BYTES_CAP = 10 * 1024 * 1024  # 10 MB strict ceiling
 _HANDLER_ATTR = "_chat4000_plugin_handler_installed"
+
+
+def _resolve_level() -> int:
+    """Log level from CHAT4000_LOG_LEVEL (default INFO). Set it to DEBUG on a test
+    box to surface the command-path / session-creation / status-cadence diagnostics
+    (which log at DEBUG so production stays quiet)."""
+    name = os.environ.get("CHAT4000_LOG_LEVEL", "INFO").strip().upper()
+    level = logging.getLevelName(name)
+    return level if isinstance(level, int) else logging.INFO
 
 
 def install_plugin_log_handler() -> Path:
@@ -52,11 +62,12 @@ def install_plugin_log_handler() -> Path:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     )
-    handler.setLevel(logging.INFO)
+    level = _resolve_level()
+    handler.setLevel(level)
 
     pkg_logger.addHandler(handler)
-    if pkg_logger.level == logging.NOTSET or pkg_logger.level > logging.INFO:
-        pkg_logger.setLevel(logging.INFO)
+    if pkg_logger.level == logging.NOTSET or pkg_logger.level > level:
+        pkg_logger.setLevel(level)
     setattr(pkg_logger, _HANDLER_ATTR, True)
     return log_path
 
