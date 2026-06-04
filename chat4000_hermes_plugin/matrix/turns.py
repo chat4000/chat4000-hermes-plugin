@@ -29,6 +29,23 @@ logger = logging.getLogger(__name__)
 TOOL_MSGTYPE = "chat4000.tool"
 STATUS_EVENT_TYPE = "chat4000.status"
 
+# Matrix rejects any single PDU over 65535 bytes (M_TOO_LARGE / 413). Tool args +
+# result are embedded in the event — and on the END edit the tool dict is
+# duplicated in m.new_content — so a large tool output (e.g. a browser_snapshot
+# dump) blows past the cap, the send 413s, and the completion edit never lands →
+# the client's tool bubble spins forever. Cap both well under the limit (the bubble
+# is only a preview) so the END always sends and the spinner always closes.
+TOOL_ARGS_MAX = 2 * 1024
+TOOL_RESULT_MAX = 8 * 1024
+
+
+def _cap(s: str, limit: int) -> str:
+    """Cap a string to `limit` UTF-8 bytes, marking the truncation."""
+    b = (s or "").encode("utf-8")
+    if len(b) <= limit:
+        return s or ""
+    return b[:limit].decode("utf-8", "ignore") + f"\n…[truncated {len(b) - limit} bytes]"
+
 
 class TurnWriter:
     """One per room. Holds nothing durable — the adapter threads anchor/tool ids."""
@@ -78,7 +95,7 @@ class TurnWriter:
             "tool_id": tool_id,
             "name": name,
             "icon": icon,
-            "args": args,
+            "args": _cap(args, TOOL_ARGS_MAX),
             "status": "running",
             "result": "",
             "duration_ms": 0,
@@ -111,9 +128,9 @@ class TurnWriter:
             "tool_id": tool_id,
             "name": name,
             "icon": icon,
-            "args": args,
+            "args": _cap(args, TOOL_ARGS_MAX),
             "status": status,  # done | failed
-            "result": result,
+            "result": _cap(result, TOOL_RESULT_MAX),
             "duration_ms": duration_ms,
         }
         content = {

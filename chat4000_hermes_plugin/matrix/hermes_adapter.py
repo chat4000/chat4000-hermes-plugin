@@ -464,6 +464,14 @@ class Chat4000MatrixAdapter:
             room,
             {"name": name, "args": args_str, "event_id": ev, "started_at": started_at},
         )
+        logger.debug(
+            "tool start: id=%s name=%s room=%s session=%s event=%s",
+            tool_id,
+            name,
+            room,
+            session_id,
+            ev,
+        )
         await self._status(room, "working")
         return tool_id
 
@@ -479,6 +487,14 @@ class Chat4000MatrixAdapter:
             return
         now = self._loop.time() if self._loop else 0.0
         duration_ms = max(0, int((now - meta.get("started_at", now)) * 1000))
+        logger.debug(
+            "tool end: id=%s name=%s room=%s status=%s dur=%dms",
+            tool_id,
+            meta["name"],
+            room,
+            status,
+            duration_ms,
+        )
         await self._tw(room).tool_end(
             room,
             meta["event_id"],

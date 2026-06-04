@@ -55,8 +55,14 @@ async def test_tool_start_embeds_turn_id_no_cleartext_relation() -> None:
 async def test_tool_end_is_mreplace_edit_with_new_content() -> None:
     c = _FakeCrypto()
     await _writer(c).tool_end(
-        "!r", "$toolev", tool_id="t1", name="bash", args="{}",
-        status="done", result="ok", duration_ms=5,
+        "!r",
+        "$toolev",
+        tool_id="t1",
+        name="bash",
+        args="{}",
+        status="done",
+        result="ok",
+        duration_ms=5,
     )
     s = c.sends[-1]
     assert s["relates_to"] == {"rel_type": "m.replace", "event_id": "$toolev"}
@@ -65,6 +71,35 @@ async def test_tool_end_is_mreplace_edit_with_new_content() -> None:
     assert new_tool["status"] == "done"
     assert new_tool["result"] == "ok"
     assert s["push"] is False
+
+
+async def test_tool_end_caps_oversized_result_under_pdu_limit() -> None:
+    """A huge tool result (e.g. a browser_snapshot dump) must be truncated so the
+    event stays under Matrix's 65535-byte PDU cap — otherwise the END 413s
+    (M_TOO_LARGE) and the client's tool bubble spins forever."""
+    import json
+
+    from chat4000_hermes_plugin.matrix.turns import TOOL_RESULT_MAX
+
+    c = _FakeCrypto()
+    huge = "x" * (200 * 1024)  # 200 KB browser dump
+    await _writer(c).tool_end(
+        "!r",
+        "$toolev",
+        tool_id="t1",
+        name="browser_snapshot",
+        args="{}",
+        status="done",
+        result=huge,
+        duration_ms=5,
+    )
+    s = c.sends[-1]
+    new_tool = s["content"]["m.new_content"]["chat4000.tool"]
+    # result is capped (nowhere near the raw 200 KB) and marked as truncated
+    assert len(new_tool["result"].encode("utf-8")) <= TOOL_RESULT_MAX + 64
+    assert "truncated" in new_tool["result"]
+    # the WHOLE event (incl. the m.new_content duplication) is well under the PDU cap
+    assert len(json.dumps(s["content"]).encode("utf-8")) < 60000
 
 
 class _DurLoop:
