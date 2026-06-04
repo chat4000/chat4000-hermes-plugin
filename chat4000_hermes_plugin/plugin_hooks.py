@@ -130,7 +130,11 @@ def on_pre_tool_call(
         dump_chat4000_trace("plugin_hooks.tool_emoji", exc)
 
     async def _emit() -> None:
-        tool_id = await adapter.external_tool_start(tool_name, args or {}, icon)
+        # Route by the FIRING session, not a global active room — concurrent
+        # sessions must not bleed tools into each other.
+        tool_id = await adapter.external_tool_start(
+            tool_name, args or {}, icon, session_id=session_id or task_id
+        )
         if tool_id:
             _PENDING_TOOL_CALLS.setdefault(queue_key, []).append((adapter, tool_id))
 
@@ -173,7 +177,9 @@ def on_post_llm_call(*, session_id: str = "", platform: str = "", **_: object) -
     if not session_id or (platform or "").strip().lower() != "chat4000":
         return
     adapter = _adapter_for_session(session_id)
-    room = getattr(adapter, "_active_room", None) if adapter is not None else None
+    # Flush THIS session's room (not a global) so a round-boundary orphan-close
+    # never tears down a different concurrent session's tool bubbles.
+    room = adapter._room_for_session(session_id) if adapter is not None else None
     if adapter is not None and room:
         _schedule_async(adapter, adapter.flush_open_tools(room))
 

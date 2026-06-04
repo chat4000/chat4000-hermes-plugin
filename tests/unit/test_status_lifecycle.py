@@ -23,7 +23,9 @@ class _FakeTurnWriter:
     async def send_status(self, room_id: str, state: str, question_event_id: str) -> None:
         self._sink.append((room_id, state, question_event_id))
 
-    async def tool_end(self, room_id, event_id, *, tool_id, name, args, status, result, duration_ms):  # type: ignore[no-untyped-def]
+    async def tool_end(
+        self, room_id, event_id, *, tool_id, name, args, status, result, duration_ms
+    ):  # type: ignore[no-untyped-def]
         self._sink.append(("tool_end", tool_id, status, duration_ms))
 
 
@@ -112,9 +114,15 @@ async def test_flush_open_tools_closes_this_rooms_tools() -> None:
     tool still open for the room, and leaves other rooms' tools alone."""
     sink: list[tuple[str, str, str]] = []
     a = _adapter(sink)
-    a._tools["t1"] = ("!r", {"event_id": "$e", "name": "browser_console", "args": "{}", "started_at": 0.0})
+    a._tools["t1"] = (
+        "!r",
+        {"event_id": "$e", "name": "browser_console", "args": "{}", "started_at": 0.0},
+    )
     a._tools["t2"] = ("!r", {"event_id": "$e2", "name": "search", "args": "{}", "started_at": 0.0})
-    a._tools["t-other"] = ("!other", {"event_id": "$x", "name": "x", "args": "{}", "started_at": 0.0})
+    a._tools["t-other"] = (
+        "!other",
+        {"event_id": "$x", "name": "x", "args": "{}", "started_at": 0.0},
+    )
     await a.flush_open_tools("!r")
     closed = {s[1] for s in sink if s[0] == "tool_end"}
     assert closed == {"t1", "t2"}  # both open tools in this room closed
@@ -141,3 +149,24 @@ async def test_followup_turn_status_survives_interrupted_turn_end() -> None:
     assert ("!r", "working", "$q2") in sink
     # …and external_tool_start (uses _active_room) would still have a room.
     assert a._active_room == "!r"
+
+
+def test_room_for_session_routes_by_session_not_global() -> None:
+    """The wrong-room-tools fix: a tool's room is resolved from the FIRING session
+    (session_id → room_id), never the global _active_room — so two concurrent
+    sessions can't bleed tools into each other."""
+    a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
+    a._room_by_session = {
+        "agent:main:chat4000:dm:!ynet": "!ynet",
+        "agent:main:chat4000:dm:!hi": "!hi",
+    }
+    a._active_room = "!hi"  # global points at the most-recent (Hi) room
+    # Each session resolves to ITS OWN room, regardless of where the global points.
+    assert a._room_for_session("agent:main:chat4000:dm:!ynet") == "!ynet"
+    assert a._room_for_session("agent:main:chat4000:dm:!hi") == "!hi"
+    # A decorated/extended session id still recovers the embedded room.
+    assert a._room_for_session("agent:main:chat4000:dm:!ynet:run42") == "!ynet"
+    # Unknown session → last-resort fallback to the global active room.
+    assert a._room_for_session("agent:main:chat4000:dm:!gone") == "!hi"
+    # Empty session id → fallback (no crash).
+    assert a._room_for_session("") == "!hi"

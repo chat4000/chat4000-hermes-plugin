@@ -77,6 +77,13 @@ class Chat4000MatrixAdapter:
         self._turns: dict[str, _TurnState] = {}
         # tool_id → (room_id, {name, args, event_id}) for hook-driven tool events.
         self._tools: dict[str, tuple[str, dict[str, Any]]] = {}
+        # Hermes session_id → room_id. The tool/flush hooks receive only a
+        # session_id (never the room), and Hermes runs sessions CONCURRENTLY, so a
+        # single _active_room bleeds one session's tools into another (the wrong-room
+        # bug). We map each session to its room — keyed exactly as Hermes builds the
+        # session key from the source — and route tool events by it. _active_room
+        # stays only as a last-resort fallback.
+        self._room_by_session: dict[str, str] = {}
         self._active_room: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._media: MediaClient | None = None  # built at connect
@@ -292,6 +299,10 @@ class Chat4000MatrixAdapter:
         # build_source / handle_message come from BasePlatformAdapter, mixed in at
         # register() time (see adapter._make_adapter_class) — invisible to mypy here.
         source = self.build_source(chat_id=room_id, user_id=sender, chat_type="dm")  # type: ignore[attr-defined]
+        # Remember which room this Hermes session belongs to, so the tool hooks
+        # (which only know the session_id) route their bubbles to THIS room even
+        # while another session runs concurrently.
+        self._remember_session_room(source, room_id)
         event = MessageEvent(
             text=text,
             message_type=message_type,
@@ -432,10 +443,12 @@ class Chat4000MatrixAdapter:
         name: str,
         args: Any,  # noqa: ANN401  # dynamic tool-call args
         icon: str = "",
+        session_id: str = "",
     ) -> str:
-        """A tool began (from pre_tool_call). Emit a chat4000.tool event related
-        to the active turn; returns a tool_id to correlate the end."""
-        room = self._active_room
+        """A tool began (from pre_tool_call). Emit a chat4000.tool event into the
+        room of the SESSION that fired it (not a global active room) so concurrent
+        sessions never cross; returns a tool_id to correlate the end."""
+        room = self._room_for_session(session_id)
         if not room or self._session is None:
             return ""
         anchor = await self._ensure_anchor(room)
@@ -541,6 +554,41 @@ class Chat4000MatrixAdapter:
         }
 
     # ─── helpers ──────────────────────────────────────────────────────────
+
+    def _remember_session_room(self, source: Any, room_id: str) -> None:  # noqa: ANN401  # Hermes SessionSource
+        """Record the Hermes session→room mapping for this turn. The key is built
+        with Hermes' OWN build_session_key, so it matches exactly the session_id the
+        tool hooks later receive (Hermes builds it deterministically from the same
+        source). Best-effort: a failure just leaves _active_room as the fallback."""
+        try:
+            from gateway.session import build_session_key
+
+            extra = getattr(getattr(self, "config", None), "extra", {}) or {}
+            skey = build_session_key(
+                source,
+                group_sessions_per_user=extra.get("group_sessions_per_user", True),
+                thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+            )
+            self._room_by_session[skey] = room_id
+        except Exception as exc:  # noqa: BLE001
+            from ..error_log import dump_chat4000_trace
+
+            dump_chat4000_trace("matrix.session_room_map", exc)
+
+    def _room_for_session(self, session_id: str) -> str | None:
+        """Resolve which room a tool/flush hook belongs to from its session_id.
+        Exact map hit first; then recover the room embedded in the session key
+        (Hermes keys embed chat_id == room_id) in case the id carries extra
+        decoration; finally fall back to _active_room."""
+        if not session_id:
+            return self._active_room
+        room = self._room_by_session.get(session_id)
+        if room:
+            return room
+        for known in self._room_by_session.values():
+            if known and (session_id.endswith(known) or f":{known}:" in session_id):
+                return known
+        return self._active_room
 
     def _tw(self, room_id: str) -> TurnWriter:
         if self._session is None:

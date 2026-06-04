@@ -20,9 +20,9 @@ class FakeAdapter:
         self.ended: list = []
         self.flushed: list = []
 
-    async def external_tool_start(self, name, args, icon=""):
+    async def external_tool_start(self, name, args, icon="", session_id=""):
         tid = f"tid-{name}"
-        self.started.append((name, args, icon, tid))
+        self.started.append((name, args, icon, tid, session_id))
         return tid
 
     async def external_tool_end(self, tool_id, *, status="done", result=""):
@@ -30,6 +30,11 @@ class FakeAdapter:
 
     async def flush_open_tools(self, room_id):
         self.flushed.append(room_id)
+
+    def _room_for_session(self, session_id):
+        # The real adapter maps session_id → room; the fake routes everything to
+        # its single room, which is enough to assert the hook passes the session.
+        return self._active_room
 
 
 async def _drain():
@@ -51,6 +56,7 @@ async def test_pre_then_post_routes_to_adapter():
         h.on_pre_tool_call(tool_name="bash", args={"cmd": "ls"}, task_id="t1", session_id="s1")
         await _drain()
         assert a.started and a.started[0][0] == "bash"
+        assert a.started[0][4] == "s1"  # the firing session is threaded through
         h.on_post_tool_call(tool_name="bash", result="ok", task_id="t1", session_id="s1")
         await _drain()
         assert a.ended == [("tid-bash", "done", "ok")]
