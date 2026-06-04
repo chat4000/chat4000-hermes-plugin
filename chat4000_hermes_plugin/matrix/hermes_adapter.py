@@ -444,11 +444,13 @@ class Chat4000MatrixAdapter:
         args: Any,  # noqa: ANN401  # dynamic tool-call args
         icon: str = "",
         session_id: str = "",
+        room: str = "",
     ) -> str:
         """A tool began (from pre_tool_call). Emit a chat4000.tool event into the
-        room of the SESSION that fired it (not a global active room) so concurrent
-        sessions never cross; returns a tool_id to correlate the end."""
-        room = self._room_for_session(session_id)
+        firing TURN's room — `room` comes from Hermes' task-local chat contextvar
+        (read synchronously in the hook), which is correct under concurrency. The
+        session map / _active_room are last-resort fallbacks only."""
+        room = room or self._room_for_session(session_id) or ""
         if not room or self._session is None:
             return ""
         anchor = await self._ensure_anchor(room)

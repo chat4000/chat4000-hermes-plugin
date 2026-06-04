@@ -20,9 +20,9 @@ class FakeAdapter:
         self.ended: list = []
         self.flushed: list = []
 
-    async def external_tool_start(self, name, args, icon="", session_id=""):
+    async def external_tool_start(self, name, args, icon="", session_id="", room=""):
         tid = f"tid-{name}"
-        self.started.append((name, args, icon, tid, session_id))
+        self.started.append((name, args, icon, tid, session_id, room))
         return tid
 
     async def external_tool_end(self, tool_id, *, status="done", result=""):
@@ -57,6 +57,24 @@ async def test_pre_then_post_routes_to_adapter():
         await _drain()
         assert a.started and a.started[0][0] == "bash"
         assert a.started[0][4] == "s1"  # the firing session is threaded through
+    finally:
+        h.deregister_active_adapter(a)
+        _clear()
+
+
+async def test_pre_tool_call_routes_by_contextvar_room(monkeypatch):
+    """The real fix: the tool's room comes from Hermes' task-local chat contextvar
+    (read synchronously in the hook), so concurrent turns can't cross — no session
+    matching, no global."""
+    a = FakeAdapter(asyncio.get_running_loop())
+    h.register_active_adapter(a)
+    _clear()
+    h._SESSION_PLATFORM["s1"] = "chat4000"
+    monkeypatch.setattr(h, "_current_chat_id", lambda: "!ctxroom")
+    try:
+        h.on_pre_tool_call(tool_name="bash", args={}, task_id="t1", session_id="s1")
+        await _drain()
+        assert a.started[0][5] == "!ctxroom"  # routed by the LIVE turn's room
         h.on_post_tool_call(tool_name="bash", result="ok", task_id="t1", session_id="s1")
         await _drain()
         assert a.ended == [("tid-bash", "done", "ok")]

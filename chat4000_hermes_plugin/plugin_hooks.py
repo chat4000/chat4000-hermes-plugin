@@ -54,6 +54,24 @@ def _adapter_for_session(session_id: str) -> Chat4000MatrixAdapter | None:
     return None
 
 
+def _current_chat_id() -> str:
+    """The current turn's chat_id (== room_id for Matrix), read from Hermes'
+    task-local session ContextVar. This is how concurrent turns stay isolated:
+    the var is per-task and Hermes preserves it across the run_in_executor hop
+    where these hooks fire.
+
+    MUST be called SYNCHRONOUSLY in the sync hook body (the executor thread, where
+    the var is live) — NEVER inside the coroutine we hand to the gateway loop via
+    run_coroutine_threadsafe, where it runs on a different thread/context and the
+    var is unset."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return get_session_env("HERMES_SESSION_CHAT_ID", "") or ""
+    except Exception:  # noqa: BLE001  # host var absent (tests / pre-turn) → no room
+        return ""
+
+
 def _schedule_async(adapter: Chat4000MatrixAdapter, coro: Coroutine[Any, Any, None]) -> None:
     """Run `coro` on the adapter's gateway event loop.
 
@@ -116,6 +134,10 @@ def on_pre_tool_call(
     if adapter is None:
         return
     queue_key = (task_id or session_id, tool_name)
+    # Read the firing turn's room HERE, synchronously, on the executor thread where
+    # Hermes' task-local contextvar is live — this is what keeps concurrent turns
+    # from bleeding. We thread it into the (later, other-thread) coroutine below.
+    room = _current_chat_id()
 
     icon = ""
     try:
@@ -130,10 +152,11 @@ def on_pre_tool_call(
         dump_chat4000_trace("plugin_hooks.tool_emoji", exc)
 
     async def _emit() -> None:
-        # Route by the FIRING session, not a global active room — concurrent
-        # sessions must not bleed tools into each other.
+        # Route by the FIRING turn's room (from the contextvar, captured above) —
+        # concurrent turns must not bleed tools into each other. session_id is the
+        # last-resort fallback only.
         tool_id = await adapter.external_tool_start(
-            tool_name, args or {}, icon, session_id=session_id or task_id
+            tool_name, args or {}, icon, room=room, session_id=session_id or task_id
         )
         if tool_id:
             _PENDING_TOOL_CALLS.setdefault(queue_key, []).append((adapter, tool_id))
@@ -177,9 +200,12 @@ def on_post_llm_call(*, session_id: str = "", platform: str = "", **_: object) -
     if not session_id or (platform or "").strip().lower() != "chat4000":
         return
     adapter = _adapter_for_session(session_id)
-    # Flush THIS session's room (not a global) so a round-boundary orphan-close
-    # never tears down a different concurrent session's tool bubbles.
-    room = adapter._room_for_session(session_id) if adapter is not None else None
+    # Flush THIS turn's room — read from the contextvar synchronously here (executor
+    # thread), so a round-boundary orphan-close never tears down a different
+    # concurrent turn's tool bubbles. session_id is the last-resort fallback.
+    room = _current_chat_id() or (
+        adapter._room_for_session(session_id) if adapter is not None else None
+    )
     if adapter is not None and room:
         _schedule_async(adapter, adapter.flush_open_tools(room))
 
