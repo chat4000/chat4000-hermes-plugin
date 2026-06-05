@@ -352,11 +352,16 @@ class Chat4000MatrixAdapter:
         text = content if isinstance(content, str) else (content or {}).get("text", "")
         if not text:
             return SendResult(success=True, message_id="")
+        # Close any still-open tool bubbles BEFORE the answer, so every tool END
+        # arrives before the answer text. The client renders in ARRIVAL order, and
+        # orphan tools (no post_tool_call — skill_view/web_extract) would otherwise be
+        # closed by _end_status AFTER the answer → "tools after the answer".
+        await self.flush_open_tools(chat_id)
         tw = self._tw(chat_id)
         anchor = await tw.start_turn(chat_id)
         if anchor:
             await tw.stream_edit(chat_id, anchor, str(text), final=True)
-        await self._end_status(chat_id)
+        await self._end_status(chat_id)  # idle (flush above already closed the tools)
         return SendResult(success=True, message_id=anchor or "")
 
     # ─── live activity (chat4000.status — protocol e3d9358) ────────────────
@@ -490,12 +495,14 @@ class Chat4000MatrixAdapter:
         now = self._loop.time() if self._loop else 0.0
         duration_ms = max(0, int((now - meta.get("started_at", now)) * 1000))
         logger.debug(
-            "tool end: id=%s name=%s room=%s status=%s dur=%dms",
+            "tool end: id=%s name=%s room=%s status=%s dur=%dms args_len=%d result_len=%d",
             tool_id,
             meta["name"],
             room,
             status,
             duration_ms,
+            len(meta.get("args") or ""),
+            len(result or ""),
         )
         await self._tw(room).tool_end(
             room,

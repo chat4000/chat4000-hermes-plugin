@@ -28,6 +28,13 @@ class _FakeTurnWriter:
     ):  # type: ignore[no-untyped-def]
         self._sink.append(("tool_end", tool_id, status, duration_ms))
 
+    async def start_turn(self, room_id):  # type: ignore[no-untyped-def]
+        self._sink.append(("start_turn", room_id))
+        return "$anchor"
+
+    async def stream_edit(self, room_id, anchor, text, final=False):  # type: ignore[no-untyped-def]
+        self._sink.append(("answer", text))
+
 
 def _adapter(sink: list[tuple[str, str, str]], loop: object = None) -> Chat4000MatrixAdapter:
     a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
@@ -149,6 +156,37 @@ async def test_followup_turn_status_survives_interrupted_turn_end() -> None:
     assert ("!r", "working", "$q2") in sink
     # …and external_tool_start (uses _active_room) would still have a room.
     assert a._active_room == "!r"
+
+
+async def test_send_flushes_open_tools_before_the_answer(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """tools-after-answer fix: any still-open tool bubble is closed BEFORE the answer
+    text is sent, so its END arrives before the answer (the client renders in arrival
+    order). Orphan tools (no post_tool_call) would otherwise close after the answer."""
+    import sys
+    import types
+
+    base = types.ModuleType("gateway.platforms.base")
+
+    class SendResult:
+        def __init__(self, success=True, message_id="", error=None):  # type: ignore[no-untyped-def]
+            self.success, self.message_id, self.error = success, message_id, error
+
+    base.SendResult = SendResult  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
+    monkeypatch.setitem(sys.modules, "gateway.platforms", types.ModuleType("gateway.platforms"))
+    monkeypatch.setitem(sys.modules, "gateway.platforms.base", base)
+
+    sink: list[tuple[str, str, str]] = []
+    a = _adapter(sink)
+    a._question_id["!r"] = "$q"
+    a._tools["t1"] = (
+        "!r",
+        {"event_id": "$e", "name": "skill_view", "args": "{}", "started_at": 0.0},
+    )
+    await a.send("!r", "the answer")
+    kinds = [s[0] for s in sink]
+    assert "tool_end" in kinds and "answer" in kinds
+    assert kinds.index("tool_end") < kinds.index("answer")  # tool closed before answer
 
 
 def test_room_for_session_routes_by_session_not_global() -> None:
