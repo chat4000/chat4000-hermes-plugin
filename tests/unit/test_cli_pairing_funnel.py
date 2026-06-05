@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import chat4000_hermes_plugin.analytics as analytics_mod
 import chat4000_hermes_plugin.cli as cli
-from chat4000_hermes_plugin.matrix.registrar_client import RedeemResult, RegistrarError, VersionVerdict
+from chat4000_hermes_plugin.matrix.registrar_client import (
+    RedeemResult,
+    RegistrarError,
+    VersionVerdict,
+)
 
 
 class _OkReg:
@@ -51,7 +55,12 @@ async def test_full_funnel_on_success(monkeypatch):
     monkeypatch.setattr(cli, "_registrar", lambda: _OkReg())
     events = _capture(monkeypatch)
     await cli._run_pair("default")
-    for expected in ("pairing_started", "plugin_onboarded", "pairing_code_registered", "pairing_completed"):
+    for expected in (
+        "pairing_started",
+        "plugin_onboarded",
+        "pairing_code_registered",
+        "pairing_completed",
+    ):
         assert expected in events, f"{expected} missing from {events}"
 
 
@@ -66,6 +75,7 @@ async def test_expired_fires_pairing_expired(monkeypatch):
 
 def test_handle_cli_error_tracks_pairing_failed_and_exits_nonzero(monkeypatch):
     import pytest
+
     events = _capture(monkeypatch)
     with pytest.raises(SystemExit) as ei:
         cli._handle_cli_error(RegistrarError(502, "M_HOMESERVER_UNAVAILABLE", "down"))

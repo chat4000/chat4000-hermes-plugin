@@ -239,9 +239,7 @@ def _ready_marker_fresh(min_mtime: float) -> bool:
         return False
 
 
-def wait_for_gateway_ready(
-    min_mtime: float, timeout: float = 180.0, est_secs: float = 90.0
-) -> int:
+def wait_for_gateway_ready(min_mtime: float, timeout: float = 180.0, est_secs: float = 90.0) -> int:
     """Block (with a progress bar) until the gateway has LOADED the chat4000 plugin
     and it reports fully connected (auth + rooms + first sync) — the adapter writes
     the 'ready' marker then. Only a marker written at/after `min_mtime` counts, so a

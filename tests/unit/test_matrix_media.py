@@ -30,7 +30,9 @@ def test_tamper_is_rejected():
 
 
 def test_media_base_from_gateway():
-    assert media_base_from_gateway("wss://gateway.chat4000.com/ws") == "https://gateway.chat4000.com"
+    assert (
+        media_base_from_gateway("wss://gateway.chat4000.com/ws") == "https://gateway.chat4000.com"
+    )
     assert media_base_from_gateway("ws://localhost:8080/ws") == "http://localhost:8080"
 
 

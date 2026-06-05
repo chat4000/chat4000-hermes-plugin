@@ -23,8 +23,8 @@ def test_drops_only_the_conflict_message(monkeypatch):
         "Error: Conflict: terminated by other getUpdates request"
     )
     other = _record("[Telegram] some unrelated warning")
-    assert f.filter(conflict) is False   # dropped
-    assert f.filter(other) is True       # kept
+    assert f.filter(conflict) is False  # dropped
+    assert f.filter(other) is True  # kept
     logging.getLogger(LOGGER).filters.clear()
 
 
