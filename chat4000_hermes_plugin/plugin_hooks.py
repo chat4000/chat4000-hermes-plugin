@@ -1,18 +1,16 @@
 """Hermes plugin-level tool hooks → chat4000.tool events (v2 / Matrix).
 
-Hermes' standard gateway runner fires the cross-cutting `pre_tool_call` /
-`post_tool_call` plugin hooks but NOT per-platform reply-pipeline tool callbacks.
-So tool bubbles come from here: we filter by `session_id` (chat4000 sessions
-only), and push tool events out via the active adapter's `external_tool_start` /
-`external_tool_end` (which emit `chat4000.tool` events related to the turn anchor).
+Tool calls are START-ONLY (protocol E): ONE `chat4000.tool` event per tool, sent
+when it starts, never updated. There is no END, no `m.replace` edit, no
+result/status/duration, and therefore no pre↔post correlation, no FIFO queue, and
+no orphan-flush — we only hook `pre_tool_call`.
 
-Mechanics (same correlation model as v1):
+Mechanics:
   - Adapters self-register on `__init__` (weakref).
   - `on_session_start` / `pre_llm_call` record which sessions are chat4000.
-  - `pre_tool_call` fires before the LLM mints a tool_call_id, so we correlate
-    pre↔post with a per-(task_id, tool_name) FIFO queue, not the id.
-  - `post_llm_call` sweeps orphans (tools whose post never fired — see
-    docs/patches-to-remember.md P1) and closes their bubbles.
+  - `pre_tool_call` reads the firing turn's room from Hermes' task-local chat
+    contextvar (synchronously, on the executor thread — correct under concurrency)
+    and emits one START event via the active adapter's `external_tool_start`.
 """
 
 from __future__ import annotations
@@ -29,9 +27,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _ACTIVE_ADAPTERS: weakref.WeakSet[Chat4000MatrixAdapter] = weakref.WeakSet()
-
-# (task_id, tool_name) → FIFO of (adapter, tool_id) awaiting their post_tool_call.
-_PENDING_TOOL_CALLS: dict[tuple[str, str], list[tuple[Chat4000MatrixAdapter, str]]] = {}
 
 # session_id → "chat4000" (populated by on_session_start / pre_llm_call).
 _SESSION_PLATFORM: dict[str, str] = {}
@@ -125,26 +120,17 @@ def on_session_end(*, session_id: str = "", **_: object) -> None:
 def on_pre_tool_call(
     *,
     tool_name: str = "",
-    args: Any = None,  # noqa: ANN401  # dynamic tool-call args from the Hermes host
+    args: Any = None,  # noqa: ANN401  # accepted for hook compat; NOT sent (START-only)
     task_id: str = "",
     session_id: str = "",
-    tool_call_id: str = "",
     **_: object,
 ) -> None:
+    """START-ONLY (protocol E): emit ONE chat4000.tool event when a tool starts.
+    There is no post_tool_call END and no round-boundary flush — the event is
+    fire-and-forget, so no correlation/queue is needed."""
     adapter = _adapter_for_session(session_id or task_id)
     if adapter is None:
         return
-    queue_key = (task_id or session_id, tool_name)
-    # Correlation diagnostics: skill_view/web_extract come through as orphans (no END).
-    # Log the keys so we can see whether their post_tool_call later fires with a
-    # DIFFERENT task_id/tool_call_id (which would break the (task_id, tool_name) FIFO).
-    logger.debug(
-        "pre_tool_call: tool=%s task_id=%s session_id=%s tool_call_id=%s",
-        tool_name,
-        task_id,
-        session_id,
-        tool_call_id,
-    )
     # Read the firing turn's room HERE, synchronously, on the executor thread where
     # Hermes' task-local contextvar is live — this is what keeps concurrent turns
     # from bleeding. We thread it into the (later, other-thread) coroutine below.
@@ -163,74 +149,11 @@ def on_pre_tool_call(
         dump_chat4000_trace("plugin_hooks.tool_emoji", exc)
 
     async def _emit() -> None:
-        # Route by the FIRING turn's room (from the contextvar, captured above) —
-        # concurrent turns must not bleed tools into each other. session_id is the
-        # last-resort fallback only.
-        tool_id = await adapter.external_tool_start(
-            tool_name, args or {}, icon, room=room, session_id=session_id or task_id
+        await adapter.external_tool_start(
+            tool_name, args, icon, room=room, session_id=session_id or task_id
         )
-        if tool_id:
-            _PENDING_TOOL_CALLS.setdefault(queue_key, []).append((adapter, tool_id))
 
     _schedule_async(adapter, _emit())
-
-
-def on_post_tool_call(
-    *,
-    tool_name: str = "",
-    result: Any = None,  # noqa: ANN401  # dynamic tool-call result from the Hermes host
-    task_id: str = "",
-    session_id: str = "",
-    tool_call_id: str = "",
-    **_: object,
-) -> None:
-    queue_key = (task_id or session_id, tool_name)
-    queue = _PENDING_TOOL_CALLS.get(queue_key)
-    # Correlation diagnostics: queue_found=False means this post couldn't be paired
-    # to its pre (mismatched task_id/tool_name) → that tool becomes an orphan and
-    # only closes at the turn-end flush. Compare task_id/tool_call_id vs the pre log.
-    logger.debug(
-        "post_tool_call: tool=%s task_id=%s session_id=%s tool_call_id=%s queue_found=%s",
-        tool_name,
-        task_id,
-        session_id,
-        tool_call_id,
-        bool(queue),
-    )
-    if not queue:
-        return
-    adapter, tool_id = queue.pop(0)
-    if not queue:
-        _PENDING_TOOL_CALLS.pop(queue_key, None)
-
-    result_text = result if isinstance(result, str) else ("" if result is None else str(result))
-    status = "failed" if result_text.startswith(("[error", "Error", "Traceback")) else "done"
-
-    async def _emit() -> None:
-        await adapter.external_tool_end(tool_id, status=status, result=result_text)
-
-    _schedule_async(adapter, _emit())
-
-
-def on_post_llm_call(*, session_id: str = "", platform: str = "", **_: object) -> None:
-    """Round-boundary orphan close. Hermes can fire a tool's pre_tool_call (START)
-    but skip its post_tool_call (END) on cancel/block/thread-no-return. A round
-    BLOCKS until all its tools finish (verified in Hermes source), so by the time
-    the next LLM step's post_llm_call fires, any tool still open is provably dead —
-    close it now (the early-orphan case) instead of waiting for turn end. The
-    adapter closes from its OWN tool list (keyed by tool_id), so the fix is
-    independent of the hook keying and idempotent with a real END / a Hermes fix."""
-    if not session_id or (platform or "").strip().lower() != "chat4000":
-        return
-    adapter = _adapter_for_session(session_id)
-    # Flush THIS turn's room — read from the contextvar synchronously here (executor
-    # thread), so a round-boundary orphan-close never tears down a different
-    # concurrent turn's tool bubbles. session_id is the last-resort fallback.
-    room = _current_chat_id() or (
-        adapter._room_for_session(session_id) if adapter is not None else None
-    )
-    if adapter is not None and room:
-        _schedule_async(adapter, adapter.flush_open_tools(room))
 
 
 def register_plugin_hooks(ctx: Any) -> None:  # noqa: ANN401  # Hermes host plugin context (untyped host object)
@@ -238,9 +161,7 @@ def register_plugin_hooks(ctx: Any) -> None:  # noqa: ANN401  # Hermes host plug
         ctx.register_hook("on_session_start", on_session_start)
         ctx.register_hook("on_session_end", on_session_end)
         ctx.register_hook("pre_llm_call", on_pre_llm_call)
-        ctx.register_hook("post_llm_call", on_post_llm_call)
         ctx.register_hook("pre_tool_call", on_pre_tool_call)
-        ctx.register_hook("post_tool_call", on_post_tool_call)
         logger.info("chat4000: v2 tool-call hooks registered")
     except Exception as exc:  # noqa: BLE001
         # Hook registration is optional (tool bubbles); a host that lacks

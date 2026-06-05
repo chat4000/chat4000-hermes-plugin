@@ -23,11 +23,6 @@ class _FakeTurnWriter:
     async def send_status(self, room_id: str, state: str, question_event_id: str) -> None:
         self._sink.append((room_id, state, question_event_id))
 
-    async def tool_end(
-        self, room_id, event_id, *, tool_id, name, args, status, result, duration_ms
-    ):  # type: ignore[no-untyped-def]
-        self._sink.append(("tool_end", tool_id, status, duration_ms))
-
     async def start_turn(self, room_id):  # type: ignore[no-untyped-def]
         self._sink.append(("start_turn", room_id))
         return "$anchor"
@@ -42,7 +37,6 @@ def _adapter(sink: list[tuple[str, str, str]], loop: object = None) -> Chat4000M
     a._question_id = {}
     a._status_state = {}
     a._status_task = {}
-    a._tools = {}
     a._active_room = None
     a._loop = loop  # type: ignore[assignment]
     a._tw = lambda room_id: _FakeTurnWriter(sink)  # type: ignore[method-assign,assignment]
@@ -116,30 +110,6 @@ async def test_keepalive_resends_then_stops(monkeypatch) -> None:  # type: ignor
     assert sum(1 for s in sink if s[1] == "working") == sent_during
 
 
-async def test_flush_open_tools_closes_this_rooms_tools() -> None:
-    """flush_open_tools (used at both round boundary and turn end) closes every
-    tool still open for the room, and leaves other rooms' tools alone."""
-    sink: list[tuple[str, str, str]] = []
-    a = _adapter(sink)
-    a._tools["t1"] = (
-        "!r",
-        {"event_id": "$e", "name": "browser_console", "args": "{}", "started_at": 0.0},
-    )
-    a._tools["t2"] = ("!r", {"event_id": "$e2", "name": "search", "args": "{}", "started_at": 0.0})
-    a._tools["t-other"] = (
-        "!other",
-        {"event_id": "$x", "name": "x", "args": "{}", "started_at": 0.0},
-    )
-    await a.flush_open_tools("!r")
-    closed = {s[1] for s in sink if s[0] == "tool_end"}
-    assert closed == {"t1", "t2"}  # both open tools in this room closed
-    assert "t-other" in a._tools  # a different room's tool untouched
-    # Idempotent: a second flush (or a late real END) finds nothing.
-    sink.clear()
-    await a.flush_open_tools("!r")
-    assert sink == []
-
-
 async def test_followup_turn_status_survives_interrupted_turn_end() -> None:
     """Rapid follow-up: turn2 claims the room, then the interrupted turn1's
     _end_status fires. turn2's context must survive so its later reasoning/tool
@@ -158,10 +128,9 @@ async def test_followup_turn_status_survives_interrupted_turn_end() -> None:
     assert a._active_room == "!r"
 
 
-async def test_send_flushes_open_tools_before_the_answer(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """tools-after-answer fix: any still-open tool bubble is closed BEFORE the answer
-    text is sent, so its END arrives before the answer (the client renders in arrival
-    order). Orphan tools (no post_tool_call) would otherwise close after the answer."""
+async def test_send_emits_answer_then_idle(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """send() posts the answer (anchor + edit) then idle. START-only means there are
+    no tool ENDs to flush — send is just answer → idle."""
     import sys
     import types
 
@@ -179,14 +148,11 @@ async def test_send_flushes_open_tools_before_the_answer(monkeypatch) -> None:  
     sink: list[tuple[str, str, str]] = []
     a = _adapter(sink)
     a._question_id["!r"] = "$q"
-    a._tools["t1"] = (
-        "!r",
-        {"event_id": "$e", "name": "skill_view", "args": "{}", "started_at": 0.0},
-    )
     await a.send("!r", "the answer")
     kinds = [s[0] for s in sink]
-    assert "tool_end" in kinds and "answer" in kinds
-    assert kinds.index("tool_end") < kinds.index("answer")  # tool closed before answer
+    assert ("answer", "the answer") in sink  # answer was sent
+    assert kinds.index("answer") < kinds.index("!r")  # then idle (the status tuple) last
+    assert ("!r", "idle", "$q") in sink
 
 
 def test_room_for_session_routes_by_session_not_global() -> None:

@@ -20,6 +20,7 @@ EDU (never persisted, no content) sent straight over the gateway.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from .crypto_driver import CryptoDriver
 from .gateway_client import GatewayClient
@@ -29,22 +30,10 @@ logger = logging.getLogger(__name__)
 TOOL_MSGTYPE = "chat4000.tool"
 STATUS_EVENT_TYPE = "chat4000.status"
 
-# Matrix rejects any single PDU over 65535 bytes (M_TOO_LARGE / 413). Tool args +
-# result are embedded in the event — and on the END edit the tool dict is
-# duplicated in m.new_content — so a large tool output (e.g. a browser_snapshot
-# dump) blows past the cap, the send 413s, and the completion edit never lands →
-# the client's tool bubble spins forever. Cap both well under the limit (the bubble
-# is only a preview) so the END always sends and the spinner always closes.
-TOOL_ARGS_MAX = 2 * 1024
-TOOL_RESULT_MAX = 8 * 1024
-
-
-def _cap(s: str, limit: int) -> str:
-    """Cap a string to `limit` UTF-8 bytes, marking the truncation."""
-    b = (s or "").encode("utf-8")
-    if len(b) <= limit:
-        return s or ""
-    return b[:limit].decode("utf-8", "ignore") + f"\n…[truncated {len(b) - limit} bytes]"
+# Per protocol.md E, the tool event content is tiny: tool_id <=64, name <=64,
+# icon <=16. Cap defensively so a pathological name/icon can't bloat the event.
+TOOL_NAME_MAX = 64
+TOOL_ICON_MAX = 16
 
 
 class TurnWriter:
@@ -86,65 +75,24 @@ class TurnWriter:
             relates_to={"rel_type": "m.replace", "event_id": anchor_id},
         )
 
-    # ─── tool events (two sends per tool) ─────────────────────────────────
+    # ─── tool events (START-ONLY — one event per tool, never updated) ─────
 
     async def tool_start(
-        self, room_id: str, anchor_id: str, *, tool_id: str, name: str, args: str, icon: str = ""
+        self, room_id: str, *, tool_id: str, name: str, icon: str = ""
     ) -> str | None:
-        tool = {
-            "tool_id": tool_id,
-            "name": name,
-            "icon": icon,
-            "args": _cap(args, TOOL_ARGS_MAX),
-            "status": "running",
-            "result": "",
-            "duration_ms": 0,
-        }
-        # The turn link is chat4000.turn_id INSIDE the encrypted content (protocol
-        # E / client contract) — NOT a cleartext m.relates_to. tool_end is the one
-        # that uses m.relates_to (an m.replace edit of this event).
+        """Protocol E (START-ONLY): a single chat4000.tool event sent when the tool
+        starts. Content is {tool_id, name, icon?} — NO args/status/result/duration,
+        NO turn_id, NO m.replace edit, push:false. The event is never updated; the
+        client renders a static chip `<icon> <name>`."""
+        tool: dict[str, Any] = {"tool_id": tool_id, "name": name[:TOOL_NAME_MAX]}
+        if icon:
+            tool["icon"] = icon[:TOOL_ICON_MAX]
         return await self._c.send_room_event(
             room_id,
             TOOL_MSGTYPE,
-            {"msgtype": TOOL_MSGTYPE, TOOL_MSGTYPE: tool, "chat4000.turn_id": anchor_id},
+            {"msgtype": TOOL_MSGTYPE, TOOL_MSGTYPE: tool},
             self._members,
             push=False,
-        )
-
-    async def tool_end(
-        self,
-        room_id: str,
-        tool_event_id: str,
-        *,
-        tool_id: str,
-        name: str,
-        args: str,
-        status: str,
-        result: str,
-        duration_ms: int,
-        icon: str = "",
-    ) -> str | None:
-        tool = {
-            "tool_id": tool_id,
-            "name": name,
-            "icon": icon,
-            "args": _cap(args, TOOL_ARGS_MAX),
-            "status": status,  # done | failed
-            "result": _cap(result, TOOL_RESULT_MAX),
-            "duration_ms": duration_ms,
-        }
-        content = {
-            "msgtype": TOOL_MSGTYPE,
-            TOOL_MSGTYPE: tool,
-            "m.new_content": {"msgtype": TOOL_MSGTYPE, TOOL_MSGTYPE: tool},
-        }
-        return await self._c.send_room_event(
-            room_id,
-            TOOL_MSGTYPE,
-            content,
-            self._members,
-            push=False,
-            relates_to={"rel_type": "m.replace", "event_id": tool_event_id},
         )
 
     # ─── live activity (chat4000.status — encrypted timeline event) ───────

@@ -23,7 +23,6 @@ the built pyvodozemac wheel).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import uuid
 from dataclasses import dataclass
@@ -75,8 +74,6 @@ class Chat4000MatrixAdapter:
         self._session: MatrixSession | None = None
         self._commands: CommandHandler | None = None
         self._turns: dict[str, _TurnState] = {}
-        # tool_id → (room_id, {name, args, event_id}) for hook-driven tool events.
-        self._tools: dict[str, tuple[str, dict[str, Any]]] = {}
         # Hermes session_id → room_id. The tool/flush hooks receive only a
         # session_id (never the room), and Hermes runs sessions CONCURRENTLY, so a
         # single _active_room bleeds one session's tools into another (the wrong-room
@@ -352,11 +349,6 @@ class Chat4000MatrixAdapter:
         text = content if isinstance(content, str) else (content or {}).get("text", "")
         if not text:
             return SendResult(success=True, message_id="")
-        # Close any still-open tool bubbles BEFORE the answer, so every tool END
-        # arrives before the answer text. The client renders in ARRIVAL order, and
-        # orphan tools (no post_tool_call — skill_view/web_extract) would otherwise be
-        # closed by _end_status AFTER the answer → "tools after the answer".
-        await self.flush_open_tools(chat_id)
         tw = self._tw(chat_id)
         anchor = await tw.start_turn(chat_id)
         if anchor:
@@ -404,9 +396,8 @@ class Chat4000MatrixAdapter:
             return
 
     async def _end_status(self, room_id: str) -> None:
-        """Close the turn: flush any still-open tool bubbles (backstop for the last
-        tool), stop the keep-alive, and send idle once (success/error/abort)."""
-        await self.flush_open_tools(room_id)
+        """Close the turn: stop the keep-alive and send idle once (success/error/
+        abort). Tool events are START-only (protocol E) — nothing to flush."""
         task = self._status_task.pop(room_id, None)
         if task is not None:
             task.cancel()
@@ -446,31 +437,22 @@ class Chat4000MatrixAdapter:
     async def external_tool_start(
         self,
         name: str,
-        args: Any,  # noqa: ANN401  # dynamic tool-call args
+        args: Any = None,  # noqa: ANN401  # accepted for hook compat; NOT sent (START-only)
         icon: str = "",
         session_id: str = "",
         room: str = "",
     ) -> str:
-        """A tool began (from pre_tool_call). Emit a chat4000.tool event into the
-        firing TURN's room — `room` comes from Hermes' task-local chat contextvar
-        (read synchronously in the hook), which is correct under concurrency. The
-        session map / _active_room are last-resort fallbacks only."""
+        """A tool started (from pre_tool_call). Emit ONE START-only chat4000.tool
+        event into the firing TURN's room — `room` comes from Hermes' task-local chat
+        contextvar (correct under concurrency); the session map is a last-resort
+        fallback. Per protocol E the event carries only {tool_id, name, icon?} — no
+        end, no edit, no args/result/status/duration. Also drives the 'working' live
+        label. Returns the tool_id correlator."""
         room = room or self._room_for_session(session_id) or ""
         if not room or self._session is None:
             return ""
-        anchor = await self._ensure_anchor(room)
-        if anchor is None:
-            return ""
         tool_id = uuid.uuid4().hex
-        args_str = args if isinstance(args, str) else _json(args)
-        ev = await self._tw(room).tool_start(
-            room, anchor, tool_id=tool_id, name=name, args=args_str, icon=icon
-        )
-        started_at = self._loop.time() if self._loop else 0.0
-        self._tools[tool_id] = (
-            room,
-            {"name": name, "args": args_str, "event_id": ev, "started_at": started_at},
-        )
+        ev = await self._tw(room).tool_start(room, tool_id=tool_id, name=name, icon=icon)
         logger.debug(
             "tool start: id=%s name=%s room=%s session=%s event=%s",
             tool_id,
@@ -481,50 +463,6 @@ class Chat4000MatrixAdapter:
         )
         await self._status(room, "working")
         return tool_id
-
-    async def external_tool_end(
-        self, tool_id: str, *, status: str = "done", result: str = ""
-    ) -> None:
-        """A tool finished (from post_tool_call). Edit its event to done/failed."""
-        entry = self._tools.pop(tool_id, None)
-        if entry is None or self._session is None:
-            return
-        room, meta = entry
-        if not meta.get("event_id"):
-            return
-        now = self._loop.time() if self._loop else 0.0
-        duration_ms = max(0, int((now - meta.get("started_at", now)) * 1000))
-        logger.debug(
-            "tool end: id=%s name=%s room=%s status=%s dur=%dms args_len=%d result_len=%d",
-            tool_id,
-            meta["name"],
-            room,
-            status,
-            duration_ms,
-            len(meta.get("args") or ""),
-            len(result or ""),
-        )
-        await self._tw(room).tool_end(
-            room,
-            meta["event_id"],
-            tool_id=tool_id,
-            name=meta["name"],
-            args=meta["args"],
-            status=status,
-            result=result,
-            duration_ms=duration_ms,
-        )
-
-    async def flush_open_tools(self, room_id: str) -> None:
-        """Close every chat4000.tool still open for this room. Hermes fires a tool's
-        START (pre_tool_call) but can skip its END (post_tool_call) on
-        cancel/block/thread-no-return, leaving the client spinning forever. Called
-        at a round boundary (post_llm_call — a round blocks until all its tools
-        finish, so anything still open is provably orphaned) AND at turn end (the
-        backstop for the last tool). Idempotent: external_tool_end pops the tool, so
-        a real END no-ops and this stays invisible once Hermes is fixed."""
-        for tid in [t for t, (r, _m) in self._tools.items() if r == room_id]:
-            await self.external_tool_end(tid, status="done", result="")
 
     # ─── streaming reply pipeline (text + status; Hermes-contract) ────────
 
@@ -632,10 +570,3 @@ class Chat4000MatrixAdapter:
         if st.anchor_id is None:
             st.anchor_id = await self._tw(room_id).start_turn(room_id)
         return st.anchor_id
-
-
-def _json(v: Any) -> str:  # noqa: ANN401  # dynamic tool-call args payload
-    try:
-        return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-    except (TypeError, ValueError):
-        return str(v)
