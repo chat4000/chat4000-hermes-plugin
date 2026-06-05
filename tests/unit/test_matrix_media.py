@@ -22,6 +22,19 @@ def test_encrypt_decrypt_roundtrip():
     assert decrypt_attachment(ciphertext, meta) == data
 
 
+def test_decrypt_accepts_unpadded_iv():
+    """Real clients (iOS) send the EncryptedFile `iv` as UNPADDED standard base64
+    (16-byte IV → 22 chars). Strict b64decode rejected that with 'Incorrect
+    padding' → every inbound voice note died before reaching Hermes. Decrypt must
+    accept the unpadded form. Strip the padding our encoder writes to simulate."""
+    data = b"voice note bytes" * 500
+    ciphertext, meta = encrypt_attachment(data)
+    meta["url"] = "mxc://hs/abc"
+    meta["iv"] = meta["iv"].rstrip("=")  # what a phone actually sends
+    assert "=" not in meta["iv"]
+    assert decrypt_attachment(ciphertext, meta) == data
+
+
 def test_tamper_is_rejected():
     ciphertext, meta = encrypt_attachment(b"secret")
     tampered = bytes([ciphertext[0] ^ 0xFF]) + ciphertext[1:]

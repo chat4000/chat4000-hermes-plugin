@@ -281,6 +281,14 @@ class Chat4000MatrixAdapter:
         media_urls: list[str] = []
         media_types: list[str] = []
 
+        # chat4000.status references the QUESTION (this inbound event). Open the turn
+        # with "thinking" BEFORE the media fetch below — a voice note's download +
+        # decrypt can take several seconds, and firing the label first means the user
+        # sees immediate feedback instead of a silent gap during that fetch.
+        if event_id:
+            self._question_id[room_id] = event_id
+            await self._status(room_id, "thinking")
+
         # Encrypted attachments (D.3): the `file` object is cleartext now that the
         # event is decrypted — download the ciphertext, decrypt, cache for Hermes'
         # vision/STT tools (path passed via media_urls, same as Telegram/WhatsApp).
@@ -331,11 +339,6 @@ class Chat4000MatrixAdapter:
             media_urls=media_urls,
             media_types=media_types,
         )
-        # chat4000.status references the QUESTION (this inbound event). Open the
-        # turn with "thinking" so the label shows even before the model streams.
-        if event_id:
-            self._question_id[room_id] = event_id
-            await self._status(room_id, "thinking")
         # handle_message RETURNS IMMEDIATELY — it spawns the agent as a background
         # task (Hermes does this for interruption support). After "thinking", the
         # live transitions are "working" (each tool start) and the final "idle"

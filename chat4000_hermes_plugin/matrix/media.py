@@ -46,6 +46,15 @@ def _b64url_unpad_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
+def _b64_unpad_decode(s: str) -> bytes:
+    """Tolerant STANDARD-base64 decode. The Matrix EncryptedFile `iv` arrives
+    UNPADDED from real clients (a 16-byte IV → 22 chars, len % 4 == 2), which
+    strict `base64.b64decode` rejects with 'Incorrect padding'. Re-add the
+    padding first. Already-padded input (our own encoder, tests) is unchanged
+    (`-len(s) % 4` == 0 → no padding added)."""
+    return base64.b64decode(s + "=" * (-len(s) % 4))
+
+
 # ─── AES-256-CTR core (pure, no I/O) ───────────────────────────────────────
 
 
@@ -82,7 +91,7 @@ def decrypt_attachment(ciphertext: bytes, file_meta: dict[str, Any]) -> bytes:
         if actual.rstrip("=") != str(expected).rstrip("="):
             raise ValueError("attachment sha256 mismatch — corrupt or tampered blob")
     key = _b64url_unpad_decode(file_meta["key"]["k"])
-    iv = base64.b64decode(file_meta["iv"])
+    iv = _b64_unpad_decode(file_meta["iv"])
     dec = Cipher(algorithms.AES(key), modes.CTR(iv)).decryptor()
     return dec.update(ciphertext) + dec.finalize()
 
