@@ -308,7 +308,7 @@ class Chat4000MatrixAdapter:
                         media_urls.append(
                             cache_image_from_bytes(raw, ext=".jpg" if ext == ".jpeg" else ext)
                         )
-                        message_type = MessageType.IMAGE
+                        message_type = MessageType.PHOTO  # host enum has PHOTO, not IMAGE
                     elif msgtype == "m.audio":
                         media_urls.append(cache_audio_from_bytes(raw, ext=ext))
                         message_type = MessageType.AUDIO
