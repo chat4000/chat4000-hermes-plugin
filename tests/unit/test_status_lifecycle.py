@@ -37,7 +37,6 @@ def _adapter(sink: list[tuple[str, str, str]], loop: object = None) -> Chat4000M
     a._question_id = {}
     a._status_state = {}
     a._status_task = {}
-    a._active_room = None
     a._loop = loop  # type: ignore[assignment]
     a._tw = lambda room_id: _FakeTurnWriter(sink)  # type: ignore[method-assign,assignment]
     return a
@@ -63,14 +62,12 @@ async def test_status_sends_each_transition_no_dedup() -> None:
 async def test_end_status_sends_idle_once_and_keeps_context() -> None:
     sink: list[tuple[str, str, str]] = []
     a = _adapter(sink)
-    a._active_room = "!r"
     a._question_id["!r"] = "$q"
     await a._status("!r", "working")
     await a._end_status("!r")  # idle exactly once
     assert sink == [("!r", "working", "$q"), ("!r", "idle", "$q")]
     # Context is NOT wiped on end — a rapid follow-up turn that already claimed this
-    # room must keep its _active_room + question_id (else it shows no thinking/tools).
-    assert a._active_room == "!r"
+    # room must keep its question_id (else it shows no thinking/tools).
     assert a._question_id["!r"] == "$q"
     # Idempotent: a second end re-sends nothing (status already idle).
     await a._end_status("!r")
@@ -116,16 +113,13 @@ async def test_followup_turn_status_survives_interrupted_turn_end() -> None:
     callbacks still emit (the no-thinking/no-tools bug)."""
     sink: list[tuple[str, str, str]] = []
     a = _adapter(sink)
-    a._active_room = "!r"
     a._question_id["!r"] = "$q2"  # turn2's question now owns the room
     await a._status("!r", "thinking")  # turn2 opened
     sink.clear()
     await a._end_status("!r")  # turn1 (interrupted) tears down
-    # turn2's context is intact → a later turn2 callback still emits status…
+    # turn2's context is intact → a later turn2 callback still emits status.
     await a._status("!r", "working")
     assert ("!r", "working", "$q2") in sink
-    # …and external_tool_start (uses _active_room) would still have a room.
-    assert a._active_room == "!r"
 
 
 async def test_send_emits_answer_then_idle(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -157,20 +151,20 @@ async def test_send_emits_answer_then_idle(monkeypatch) -> None:  # type: ignore
 
 def test_room_for_session_routes_by_session_not_global() -> None:
     """The wrong-room-tools fix: a tool's room is resolved from the FIRING session
-    (session_id → room_id), never the global _active_room — so two concurrent
-    sessions can't bleed tools into each other."""
+    (session_id → room_id), never a shared/global room — so two concurrent sessions
+    can't bleed tools into each other."""
     a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
     a._room_by_session = {
         "agent:main:chat4000:dm:!ynet": "!ynet",
         "agent:main:chat4000:dm:!hi": "!hi",
     }
-    a._active_room = "!hi"  # global points at the most-recent (Hi) room
-    # Each session resolves to ITS OWN room, regardless of where the global points.
+    # Each session resolves to ITS OWN room (no shared/global room is consulted).
     assert a._room_for_session("agent:main:chat4000:dm:!ynet") == "!ynet"
     assert a._room_for_session("agent:main:chat4000:dm:!hi") == "!hi"
     # A decorated/extended session id still recovers the embedded room.
     assert a._room_for_session("agent:main:chat4000:dm:!ynet:run42") == "!ynet"
-    # Unknown session → last-resort fallback to the global active room.
-    assert a._room_for_session("agent:main:chat4000:dm:!gone") == "!hi"
-    # Empty session id → fallback (no crash).
-    assert a._room_for_session("") == "!hi"
+    # Unknown session → None: there is deliberately NO shared-room fallback, which
+    # would leak the chip into the wrong room under concurrency.
+    assert a._room_for_session("agent:main:chat4000:dm:!gone") is None
+    # Empty session id → None too (no crash, no misroute).
+    assert a._room_for_session("") is None

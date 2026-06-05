@@ -21,6 +21,12 @@ class FakeRooms:
     async def invite_user(self, room, uid):
         self.invited.append((room, uid))
 
+    async def create_session_room_and_invite(self, members, title="session", agent_id="main"):
+        room_id = await self.create_session_room(title, agent_id)
+        for uid in members:
+            await self.invite_user(room_id, uid)
+        return room_id
+
     async def rename_session(self, room, title):
         self.renamed.append((room, title))
 
@@ -32,7 +38,9 @@ class FakeCrypto:
     def __init__(self):
         self.sent: list = []
 
-    async def send_room_event(self, room, etype, content, members, *, push=None, relates_to=None, txn_id=None):
+    async def send_room_event(
+        self, room, etype, content, members, *, push=None, relates_to=None, txn_id=None
+    ):
         self.sent.append((room, content, push))
         return "$r"
 
@@ -49,7 +57,9 @@ class FakeSession:
 
 async def test_session_new_creates_invites_and_replies():
     s = FakeSession()
-    await CommandHandler(s).handle("!control:hs", "session.new", {"title": "deploy", "agent_id": "main"})
+    await CommandHandler(s).handle(
+        "!control:hs", "session.new", {"title": "deploy", "agent_id": "main"}
+    )
     assert s.rooms.created == [("deploy", "main")]
     assert ("!new:hs", "@u:hs") in s.rooms.invited
     room, content, push = s.crypto.sent[-1]

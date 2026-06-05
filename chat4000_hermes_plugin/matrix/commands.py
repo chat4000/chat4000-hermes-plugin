@@ -83,17 +83,12 @@ class CommandHandler:
         agent_id = content.get("agent_id") or "main"
         t0 = time.monotonic()
         logger.debug("session.new: creating room title=%r agent_id=%s", title, agent_id)
-        room_id = await self._rooms.create_session_room(title, agent_id)
-        t_created = time.monotonic()
-        for uid in self._s.members:
-            await self._rooms.invite_user(room_id, uid)
-        t_invited = time.monotonic()
+        room_id = await self._rooms.create_session_room_and_invite(self._s.members, title, agent_id)
         logger.debug(
-            "session.new: room=%s created in %.0fms, invited %d member(s) in %.0fms",
+            "session.new: room=%s created + %d member(s) invited in %.0fms",
             room_id,
-            (t_created - t0) * 1000,
             len(self._s.members),
-            (t_invited - t_created) * 1000,
+            (time.monotonic() - t0) * 1000,
         )
         await self._reply("session.new", {"ok": True, "room_id": room_id})
         logger.debug(

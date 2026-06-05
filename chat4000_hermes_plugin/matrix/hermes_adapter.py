@@ -6,15 +6,14 @@ build_source/MessageEvent/handle_message) is unchanged from v1.
 
   inbound user message (session room) → handle_message → Hermes agent
   inbound chat4000.command (control)   → CommandHandler
-  agent reply (streaming)              → TurnWriter (anchor + m.replace edits)
+  agent reply                          → send() → TurnWriter (anchor + final edit)
   agent live activity                  → chat4000.status (encrypted, refs question)
   agent tool calls                     → chat4000.tool events, via plugin_hooks
-                                         (pre/post_tool_call → external_tool_*)
+                                         (pre_tool_call → external_tool_start)
 
-Text streaming + status flow through `reply_pipeline_options`. Tool calls flow
-through `plugin_hooks` (Hermes' standard runner fires pre/post_tool_call but not
-the reply-pipeline tool callbacks — same reason as v1), which calls the
-`external_tool_*` methods here.
+The host delivers the finished answer through `send(chat_id=...)` — room-explicit,
+so concurrent turns never cross. Tool calls flow through `plugin_hooks` (Hermes'
+standard runner fires pre_tool_call), which calls `external_tool_start` here.
 
 ⚠️ Hermes-runtime-coupled; not unit-tested offline (needs the Hermes process +
 the built pyvodozemac wheel).
@@ -25,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..package_info import read_package_version
@@ -39,10 +37,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Throttle streaming edits to stay under the 900 msg/min cap (X5); the final edit
-# always flushes immediately.
-STREAM_MIN_INTERVAL_S = 0.4
-
 # Live activity = chat4000.status (encrypted timeline event, protocol e3d9358).
 # Re-send the current state every STATUS_KEEPALIVE_S as a keep-alive; it must stay
 # under the client's 10s TTL (a dropped event must not expire the label mid-turn).
@@ -53,12 +47,12 @@ STATUS_KEEPALIVE_S = 4.0
 INVITE_WATCH_INTERVAL_S = 3.0
 
 
-@dataclass
-class _TurnState:
-    room_id: str
-    anchor_id: str | None = None
-    last_text: str = ""
-    last_edit_at: float = 0.0
+class _UnroutableToolStart(Exception):
+    """A tool fired but its room couldn't be resolved from per-turn identity
+    (empty contextvar + no session-map hit). Raised only to carry a stable
+    fingerprint into the error sink (type+message dedup, 1/hr) so the real-world
+    frequency of unroutable tool starts is measurable; never propagated. We DROP
+    the chip rather than misroute it to a stale, wrong-room guess."""
 
 
 class Chat4000MatrixAdapter:
@@ -73,15 +67,12 @@ class Chat4000MatrixAdapter:
         self._account_id = extra.get("accountId") or extra.get("account_id") or "default"
         self._session: MatrixSession | None = None
         self._commands: CommandHandler | None = None
-        self._turns: dict[str, _TurnState] = {}
-        # Hermes session_id → room_id. The tool/flush hooks receive only a
-        # session_id (never the room), and Hermes runs sessions CONCURRENTLY, so a
-        # single _active_room bleeds one session's tools into another (the wrong-room
-        # bug). We map each session to its room — keyed exactly as Hermes builds the
-        # session key from the source — and route tool events by it. _active_room
-        # stays only as a last-resort fallback.
+        # Hermes session_id → room_id. The tool hooks receive only a session_id
+        # (never the room), and Hermes runs sessions CONCURRENTLY, so we map each
+        # session to its room — keyed exactly as Hermes builds the session key from
+        # the source — and route tool events by it. An unresolved session DROPS the
+        # chip (external_tool_start); there is deliberately NO global-room fallback.
         self._room_by_session: dict[str, str] = {}
-        self._active_room: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._media: MediaClient | None = None  # built at connect
         self._connected = False
@@ -156,6 +147,7 @@ class Chat4000MatrixAdapter:
                 await self._session.set_members(users)
                 for uid in users:
                     await self._session.invite_user(uid)
+                    await self._ensure_initial_session(uid)
             self._invited = set(users)
         except Exception as exc:  # noqa: BLE001
             # connect() boundary: report the unexpected failure once, then convert
@@ -216,11 +208,41 @@ class Chat4000MatrixAdapter:
                         await self._session.invite_user(uid)
                         self._invited.add(uid)
                         logger.info("chat4000: live-invited newly-paired user %s", uid)
+                        await self._ensure_initial_session(uid)
             except Exception as exc:  # noqa: BLE001
                 from ..error_log import dump_chat4000_trace
 
                 dump_chat4000_trace("matrix.invite_watch", exc)
             await asyncio.sleep(INVITE_WATCH_INTERVAL_S)
+
+    async def _ensure_initial_session(self, user_id: str) -> None:
+        """Auto-create ONE initial session room for a paired user + invite them, so
+        their first chat works without pressing "New Session".
+
+        DURABLE dedupe: the onboarded store records user→room, so a restart — which
+        re-reads known-users and re-invites everyone — never mints a SECOND initial
+        room (the per-connection `_invited` set is not durable; this store is).
+
+        Invite-failure policy: `invite_user` only LOGS HTTP failures (never raises),
+        so the room is created + marked onboarded even if the invite didn't land; the
+        invite-watch loop re-invites known users to every room, self-healing a missing
+        invite WITHOUT a duplicate room. One user's failure (e.g. a network throw
+        before the room is made) must not break connect()/the watch loop, so we report
+        and swallow here; a throw before the mark just means the next poll retries."""
+        from .users_store import load_onboarded, mark_onboarded
+
+        if self._session is None or self._session.rooms is None:
+            return
+        if user_id in load_onboarded(self._account_id):
+            return
+        try:
+            room_id = await self._session.rooms.create_session_room_and_invite([user_id])
+            mark_onboarded(user_id, room_id, self._account_id)
+            logger.info("chat4000: auto-created initial session room %s for %s", room_id, user_id)
+        except Exception as exc:  # noqa: BLE001
+            from ..error_log import dump_chat4000_trace
+
+            dump_chat4000_trace("matrix.auto_initial_session", exc, {"user_id": user_id})
 
     async def disconnect(self) -> None:
         self._connected = False
@@ -309,19 +331,17 @@ class Chat4000MatrixAdapter:
             media_urls=media_urls,
             media_types=media_types,
         )
-        self._active_room = room_id
         # chat4000.status references the QUESTION (this inbound event). Open the
         # turn with "thinking" so the label shows even before the model streams.
         if event_id:
             self._question_id[room_id] = event_id
             await self._status(room_id, "thinking")
         # handle_message RETURNS IMMEDIATELY — it spawns the agent as a background
-        # task (Hermes does this for interruption support). The turn's
-        # working/typing transitions, the 4s keep-alive, and the final idle are
-        # driven by the reply pipeline (on_final) and Hermes' turn-end hook
-        # (stop_typing), which fire when the agent ACTUALLY finishes. Do NOT end the
-        # status or clear _active_room here, or idle fires ~150ms in (before the
-        # turn starts) and every later tool/status callback no-ops.
+        # task (Hermes does this for interruption support). After "thinking", the
+        # live transitions are "working" (each tool start) and the final "idle"
+        # (Hermes' turn-end hook stop_typing, and send()). Do NOT end the status
+        # here, or idle fires ~150ms in (before the turn starts) and every later
+        # tool/status callback no-ops.
         try:
             await self.handle_message(event)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001
@@ -406,14 +426,13 @@ class Chat4000MatrixAdapter:
             logger.debug("chat4000.status -> idle (room=%s q=%s)", room_id, qid)
             await self._tw(room_id).send_status(room_id, "idle", qid)
             self._status_state[room_id] = "idle"  # record (dedupe a second end), don't drop
-        # Deliberately DO NOT clear _active_room / _question_id here. A rapid /
-        # interrupting follow-up message may have ALREADY claimed this room (set its
-        # own _active_room + question_id); clearing on the OLD turn's teardown would
-        # wipe the NEW turn's context → it would run with no thinking and no tool
-        # bubbles (the answer still ships via send(), which is why you'd see a reply
-        # with no activity). _on_user_message always overwrites with the latest
-        # turn, and the reply-pipeline callbacks re-arm the keep-alive, so the
-        # latest turn's status self-heals.
+        # Deliberately DO NOT clear _question_id here. A rapid / interrupting
+        # follow-up message may have ALREADY claimed this room (set its own
+        # question_id); clearing on the OLD turn's teardown would wipe the NEW turn's
+        # context → it would run with no thinking and no tool bubbles (the answer
+        # still ships via send(), which is why you'd see a reply with no activity).
+        # _on_user_message overwrites _question_id with the latest turn and re-arms
+        # the keep-alive, so the latest turn's status self-heals.
 
     async def send_typing(
         self,
@@ -421,8 +440,9 @@ class Chat4000MatrixAdapter:
         metadata: Any = None,  # noqa: ANN401  # Hermes host metadata
     ) -> None:
         # Native typing is removed (protocol e3d9358). Live activity is
-        # chat4000.status, driven by the reply pipeline + our own 4s keep-alive —
-        # NOT Hermes' typing loop. No-op so the host's keepalive does nothing here.
+        # chat4000.status, driven by message receipt + tool starts + our own 4s
+        # keep-alive — NOT Hermes' typing loop. No-op so the host's keepalive does
+        # nothing here.
         return None
 
     async def stop_typing(self, chat_id: str) -> None:
@@ -445,11 +465,28 @@ class Chat4000MatrixAdapter:
         """A tool started (from pre_tool_call). Emit ONE START-only chat4000.tool
         event into the firing TURN's room — `room` comes from Hermes' task-local chat
         contextvar (correct under concurrency); the session map is a last-resort
-        fallback. Per protocol E the event carries only {tool_id, name, icon?} — no
-        end, no edit, no args/result/status/duration. Also drives the 'working' live
-        label. Returns the tool_id correlator."""
+        per-turn fallback. If NEITHER resolves a room we DROP the chip and report it
+        (no global fallback — that would misroute it under concurrency). Per protocol
+        E the event carries only {tool_id, name, icon?} — no end, no edit, no
+        args/result/status/duration. Also drives the 'working' live label. Returns
+        the tool_id correlator (empty string when dropped)."""
         room = room or self._room_for_session(session_id) or ""
-        if not room or self._session is None:
+        if self._session is None:
+            return ""  # not connected — benign, nothing to report
+        if not room:
+            # Per-turn identity gave us no room and we REFUSE the global fallback
+            # (it would leak the chip into the wrong concurrent room). Drop the
+            # event and report it: pending verification of the host's
+            # HERMES_SESSION_CHAT_ID contract during pre_tool_call, an unresolved
+            # room is UNEXPECTED. The sink dedups by type+message at 1/hr, so a
+            # high-frequency empty case collapses to one counted entry.
+            from ..error_log import dump_chat4000_trace
+
+            dump_chat4000_trace(
+                "matrix.tool_start_unroutable",
+                _UnroutableToolStart(f"no room for tool {name!r}"),
+                {"tool_name": name, "session_id": session_id},
+            )
             return ""
         tool_id = uuid.uuid4().hex
         ev = await self._tw(room).tool_start(room, tool_id=tool_id, name=name, icon=icon)
@@ -464,65 +501,14 @@ class Chat4000MatrixAdapter:
         await self._status(room, "working")
         return tool_id
 
-    # ─── streaming reply pipeline (text + status; Hermes-contract) ────────
-
-    def reply_pipeline_options(self) -> dict[str, Any]:
-        if self._session is None:
-            return {}
-
-        async def on_reasoning_stream(_p: dict[str, Any]) -> None:
-            if self._active_room:
-                await self._status(self._active_room, "thinking")
-
-        async def on_assistant_message_start(_p: dict[str, Any]) -> None:
-            if self._active_room:
-                await self._ensure_anchor(self._active_room)
-                await self._status(self._active_room, "typing")
-
-        async def on_partial_reply(payload: dict[str, Any]) -> None:
-            room = self._active_room
-            text = (payload or {}).get("text") or ""
-            if not room or not text:
-                return
-            anchor = await self._ensure_anchor(room)
-            if anchor is None:
-                return
-            st = self._turn_state(room)
-            st.last_text = text
-            now = self._loop.time() if self._loop else 0.0
-            if now - st.last_edit_at >= STREAM_MIN_INTERVAL_S:
-                st.last_edit_at = now
-                await self._tw(room).stream_edit(room, anchor, text, final=False)
-
-        async def on_final(payload: dict[str, Any]) -> None:
-            room = self._active_room
-            if not room:
-                return
-            st = self._turns.pop(room, None)
-            text = (payload or {}).get("text") or (st.last_text if st else "")
-            tw = self._tw(room)
-            if st and st.anchor_id:
-                await tw.stream_edit(room, st.anchor_id, text, final=True)
-            elif text:
-                anchor = await tw.start_turn(room)
-                if anchor:
-                    await tw.stream_edit(room, anchor, text, final=True)
-            await self._end_status(room)
-
-        return {
-            "on_reasoning_stream": on_reasoning_stream,
-            "on_assistant_message_start": on_assistant_message_start,
-            "on_partial_reply": on_partial_reply,
-            "on_final": on_final,
-        }
-
     # ─── helpers ──────────────────────────────────────────────────────────
 
     def _remember_session_room(self, source: Any, room_id: str) -> None:  # noqa: ANN401  # Hermes SessionSource
         """Record the Hermes session→room mapping for this turn. The key is built
         with Hermes' OWN build_session_key, so it matches exactly the session_id the
         tool hooks later receive (Hermes builds it deterministically from the same
-        source). Best-effort: a failure just leaves _active_room as the fallback."""
+        source). Best-effort: on failure the tool hook can't resolve the room and
+        drops the chip (there is no global-room fallback)."""
         try:
             from gateway.session import build_session_key
 
@@ -539,34 +525,25 @@ class Chat4000MatrixAdapter:
             dump_chat4000_trace("matrix.session_room_map", exc)
 
     def _room_for_session(self, session_id: str) -> str | None:
-        """Resolve which room a tool/flush hook belongs to from its session_id.
-        Exact map hit first; then recover the room embedded in the session key
-        (Hermes keys embed chat_id == room_id) in case the id carries extra
-        decoration; finally fall back to _active_room."""
+        """Resolve which room a tool hook belongs to from its session_id, by
+        PER-TURN identity only. Exact map hit first; then recover the room embedded
+        in the session key (Hermes keys embed chat_id == room_id) in case the id
+        carries extra decoration. Returns None when it can't be resolved — there is
+        deliberately NO global-room fallback: any single "current room" is
+        last-written by the most recent inbound message, so under concurrent turns it
+        points at the WRONG room and would render a tool chip in another user's room
+        (a cross-room leak). An unresolved room must drop the chip, not misroute it."""
         if not session_id:
-            return self._active_room
+            return None
         room = self._room_by_session.get(session_id)
         if room:
             return room
         for known in self._room_by_session.values():
             if known and (session_id.endswith(known) or f":{known}:" in session_id):
                 return known
-        return self._active_room
+        return None
 
     def _tw(self, room_id: str) -> TurnWriter:
         if self._session is None:
             raise RuntimeError("_tw called before connect() built the session")
         return self._session.turn_writer(room_id)
-
-    def _turn_state(self, room_id: str) -> _TurnState:
-        st = self._turns.get(room_id)
-        if st is None:
-            st = _TurnState(room_id=room_id)
-            self._turns[room_id] = st
-        return st
-
-    async def _ensure_anchor(self, room_id: str) -> str | None:
-        st = self._turn_state(room_id)
-        if st.anchor_id is None:
-            st.anchor_id = await self._tw(room_id).start_turn(room_id)
-        return st.anchor_id

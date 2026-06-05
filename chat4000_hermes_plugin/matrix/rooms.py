@@ -65,6 +65,17 @@ class RoomManager:
             title or "session", kind="session", extra_kind={"agent_id": agent_id}
         )
 
+    async def create_session_room_and_invite(
+        self, members: list[str], title: str = "session", agent_id: str = "main"
+    ) -> str:
+        """Create ONE encrypted session room and invite each member into it. The
+        single create+invite path shared by the `session.new` command and the
+        auto-create-at-pairing flow (so neither reimplements room creation)."""
+        room_id = await self.create_session_room(title, agent_id)
+        for uid in members:
+            await self.invite_user(room_id, uid)
+        return room_id
+
     async def _create_encrypted_room(
         self, name: str, *, kind: str, extra_kind: dict[str, Any] | None = None
     ) -> str:
