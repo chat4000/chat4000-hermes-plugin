@@ -128,12 +128,23 @@ def on_pre_tool_call(
     args: Any = None,  # noqa: ANN401  # dynamic tool-call args from the Hermes host
     task_id: str = "",
     session_id: str = "",
+    tool_call_id: str = "",
     **_: object,
 ) -> None:
     adapter = _adapter_for_session(session_id or task_id)
     if adapter is None:
         return
     queue_key = (task_id or session_id, tool_name)
+    # Correlation diagnostics: skill_view/web_extract come through as orphans (no END).
+    # Log the keys so we can see whether their post_tool_call later fires with a
+    # DIFFERENT task_id/tool_call_id (which would break the (task_id, tool_name) FIFO).
+    logger.debug(
+        "pre_tool_call: tool=%s task_id=%s session_id=%s tool_call_id=%s",
+        tool_name,
+        task_id,
+        session_id,
+        tool_call_id,
+    )
     # Read the firing turn's room HERE, synchronously, on the executor thread where
     # Hermes' task-local contextvar is live — this is what keeps concurrent turns
     # from bleeding. We thread it into the (later, other-thread) coroutine below.
@@ -170,10 +181,22 @@ def on_post_tool_call(
     result: Any = None,  # noqa: ANN401  # dynamic tool-call result from the Hermes host
     task_id: str = "",
     session_id: str = "",
+    tool_call_id: str = "",
     **_: object,
 ) -> None:
     queue_key = (task_id or session_id, tool_name)
     queue = _PENDING_TOOL_CALLS.get(queue_key)
+    # Correlation diagnostics: queue_found=False means this post couldn't be paired
+    # to its pre (mismatched task_id/tool_name) → that tool becomes an orphan and
+    # only closes at the turn-end flush. Compare task_id/tool_call_id vs the pre log.
+    logger.debug(
+        "post_tool_call: tool=%s task_id=%s session_id=%s tool_call_id=%s queue_found=%s",
+        tool_name,
+        task_id,
+        session_id,
+        tool_call_id,
+        bool(queue),
+    )
     if not queue:
         return
     adapter, tool_id = queue.pop(0)
