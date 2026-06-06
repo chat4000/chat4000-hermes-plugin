@@ -1,4 +1,4 @@
-"""CLI subcommands: `chat4000 pair|status|reset|wizard|telemetry` (v2 / Matrix).
+"""CLI subcommands: `chat4000 pair|status|reset|uninstall|wizard|telemetry` (v2 / Matrix).
 
 Pairing is now a 6-digit OTP via the registrar (protocol C), not the v1 relay
 handshake:
@@ -8,6 +8,8 @@ handshake:
            the paired user so the running gateway invites them.
   status — show the bot identity + paired users.
   reset  — wipe bot creds + crypto store + known users (destructive).
+  uninstall — disable the plugin in the Hermes config + delete ALL plugin state
+           (every account), then print the pip step (destructive, global).
   wizard — interactive installer (unchanged).
   telemetry — opt in/out (unchanged).
 
@@ -204,6 +206,19 @@ def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (unty
         """Wipe bot creds + crypto store + known users (destructive)."""
         _run_reset(account)
 
+    @chat4000.command("uninstall")
+    @click.option("--yes", is_flag=True, default=False, help="Skip the confirmation prompt.")
+    def cmd_uninstall(yes: bool) -> None:
+        """Fully remove chat4000: disable it in the Hermes config and delete ALL
+        plugin state (every account's creds, crypto store, known/onboarded users,
+        env, logs). Destructive + global. Prints the pip step to finish removal."""
+        if not yes and not click.confirm(
+            "Remove ALL chat4000 plugin state and disable it in the Hermes config?"
+        ):
+            click.echo("Uninstall cancelled.")
+            return
+        _run_uninstall()
+
     @chat4000.command("wizard")
     def cmd_wizard() -> None:
         """Interactive install wizard."""
@@ -399,7 +414,107 @@ def _run_reset(account: str) -> None:
     click.echo("Re-pair with: chat4000 pair")
 
 
+def _run_uninstall() -> None:
+    """Reverse the install footprint: disable the plugin in the Hermes config and
+    delete the ENTIRE plugin state dir (all accounts). The pip package can't
+    cleanly uninstall itself from inside its own running process, so we print that
+    final step rather than attempt it."""
+    import shutil
+
+    import click
+
+    from . import analytics
+    from .key_store import resolve_chat4000_plugin_dir
+
+    _disable_plugin_in_hermes_config()
+    plugin_dir = resolve_chat4000_plugin_dir()
+    existed = plugin_dir.exists()
+    # Track + flush BEFORE the rmtree — telemetry preference state lives under the
+    # plugin dir, so report the uninstall while it's still readable.
+    analytics.track("uninstall_performed", {"had_state": existed})
+    analytics.flush()
+    removed = False
+    if existed:
+        try:
+            shutil.rmtree(plugin_dir)
+            removed = True
+        except OSError as exc:
+            click.echo(f"Could not remove {plugin_dir}: {exc}", err=True)
+    if removed:
+        click.echo(f"Removed chat4000 plugin state: {plugin_dir}")
+    else:
+        click.echo("No chat4000 plugin state to remove.")
+    pkg = _distribution_name()
+    click.echo("")
+    click.echo("To finish removing the plugin, uninstall the package and restart Hermes:")
+    click.echo(f"  pip uninstall -y {pkg}")
+    click.echo("  (then restart the Hermes gateway so it stops loading chat4000)")
+
+
+def _distribution_name() -> str:
+    """The installed pip distribution name, for the final `pip uninstall` hint.
+    Falls back to the known package name if metadata lookup isn't available."""
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        from importlib.metadata import distributions
+
+        for dist in distributions():
+            top_level = dist.read_text("top_level.txt") or ""
+            if "chat4000_hermes_plugin" in top_level.split():
+                return str(dist.metadata["Name"])
+    return "chat4000-hermes-plugin"
+
+
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _hermes_config_path() -> Path:
+    """Resolve Hermes' config.yaml: prefer hermes_constants' home, else
+    HERMES_HOME, else ~/.hermes."""
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+
+        return Path(get_hermes_home()) / "config.yaml"
+    except ImportError:
+        home = os.environ.get("HERMES_HOME", "").strip()
+        return (Path(home).expanduser() if home else Path.home() / ".hermes") / "config.yaml"
+
+
+def _disable_plugin_in_hermes_config() -> None:
+    """Remove 'chat4000' from Hermes' plugins.enabled in config.yaml (idempotent).
+
+    The inverse of `_ensure_plugin_enabled_in_hermes_config` — so after an
+    uninstall the gateway stops loading the plugin on its next restart.
+    Best-effort: no-op if yaml/config aren't available (operator edits manually)."""
+    try:
+        import yaml
+    except ImportError:
+        return
+    cfg_path = _hermes_config_path()
+    if not cfg_path.exists():
+        return
+    try:
+        import click
+
+        cfg = yaml.safe_load(cfg_path.read_text())
+        if not isinstance(cfg, dict):
+            return
+        plugins = cfg.get("plugins")
+        if not isinstance(plugins, dict):
+            return
+        enabled = plugins.get("enabled")
+        if not isinstance(enabled, list) or "chat4000" not in enabled:
+            return
+        plugins["enabled"] = [p for p in enabled if p != "chat4000"]
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        click.echo(f"Disabled chat4000 in Hermes config: {cfg_path}")
+    except Exception as exc:  # noqa: BLE001
+        # Best-effort config edit (operator can disable manually). Report once,
+        # then continue — never let a config-write failure abort the uninstall.
+        from .error_log import dump_chat4000_trace
+
+        dump_chat4000_trace("cli.disable_plugin_config", exc)
 
 
 def _ensure_plugin_enabled_in_hermes_config() -> None:
@@ -412,16 +527,7 @@ def _ensure_plugin_enabled_in_hermes_config() -> None:
         import yaml
     except ImportError:
         return
-    # Resolve the Hermes home/config path (prefer hermes_constants, fall back to
-    # HERMES_HOME / ~/.hermes).
-    cfg_path: Path
-    try:
-        from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
-
-        cfg_path = get_hermes_home() / "config.yaml"
-    except ImportError:
-        home = os.environ.get("HERMES_HOME", "").strip()
-        cfg_path = (Path(home).expanduser() if home else Path.home() / ".hermes") / "config.yaml"
+    cfg_path = _hermes_config_path()
     try:
         import click
 
