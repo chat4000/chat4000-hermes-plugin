@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from .rooms import DEFAULT_SESSION_ROOM_NAME
+
 if TYPE_CHECKING:
     from .crypto_driver import CryptoDriver
     from .rooms import RoomManager
@@ -57,6 +59,8 @@ class CommandHandler:
                 await self._session_new(content)
             elif command == "session.rename":
                 await self._session_rename(content)
+            elif command == "session.delete":
+                await self._session_delete(content)
             elif command == "session.archive":
                 await self._session_archive(content)
             elif command == "plugin.update_check":
@@ -79,7 +83,7 @@ class CommandHandler:
     async def _session_new(self, content: dict[str, Any]) -> None:
         import time
 
-        title = content.get("title") or "session"
+        title = content.get("title") or DEFAULT_SESSION_ROOM_NAME
         agent_id = content.get("agent_id") or "main"
         t0 = time.monotonic()
         logger.debug("session.new: creating room title=%r agent_id=%s", title, agent_id)
@@ -115,6 +119,14 @@ class CommandHandler:
             return
         await self._rooms.archive_session(room_id)
         await self._reply("session.archive", {"ok": True, "room_id": room_id})
+
+    async def _session_delete(self, content: dict[str, Any]) -> None:
+        room_id = content.get("room_id")
+        if not room_id:
+            await self._reply("session.delete", {"ok": False, "error": "room_id required"})
+            return
+        await self._rooms.delete_session(room_id)
+        await self._reply("session.delete", {"ok": True, "room_id": room_id})
 
     async def _update_check(self) -> None:
         # Read-only. We don't (yet) resolve a latest version or restart method —

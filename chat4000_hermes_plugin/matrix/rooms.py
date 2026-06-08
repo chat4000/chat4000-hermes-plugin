@@ -19,7 +19,7 @@ discovers them from sync.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .gateway_client import GatewayClient
@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 
 MEGOLM = "m.megolm.v1.aes-sha2"
 ROOM_KIND = "chat4000.room_kind"
+DEFAULT_SESSION_ROOM_NAME = "New chat"
+
+
+def derive_first_message_title(text: str) -> str | None:
+    """Protocol E deterministic room title from the first user message."""
+    normalized = " ".join(text.split())
+    if not normalized:
+        return None
+    dot = normalized.find(".")
+    title = normalized[:dot] if 0 <= dot < 50 else normalized[:50]
+    title = title.strip()
+    return title or None
 
 
 @dataclass
@@ -36,6 +48,8 @@ class RoomManager:
     server_name: str  # for m.space.child `via`
     space_id: str | None = None
     control_room_id: str | None = None
+    _room_names: dict[str, str] = field(default_factory=dict)
+    _auto_titles: dict[str, str] = field(default_factory=dict)
 
     # ─── creation ─────────────────────────────────────────────────────────
 
@@ -62,11 +76,11 @@ class RoomManager:
         # agent_id is carried in the room_kind content so the plugin can route
         # the room to the right Hermes agent session.
         return await self._create_encrypted_room(
-            title or "session", kind="session", extra_kind={"agent_id": agent_id}
+            title or DEFAULT_SESSION_ROOM_NAME, kind="session", extra_kind={"agent_id": agent_id}
         )
 
     async def create_session_room_and_invite(
-        self, members: list[str], title: str = "session", agent_id: str = "main"
+        self, members: list[str], title: str = DEFAULT_SESSION_ROOM_NAME, agent_id: str = "main"
     ) -> str:
         """Create ONE encrypted session room and invite each member into it. The
         single create+invite path shared by the `session.new` command and the
@@ -100,6 +114,7 @@ class RoomManager:
         )
         self._check(status, body, f"create_{kind}_room")
         room_id: str = body["room_id"]
+        self._room_names[room_id] = name
         logger.debug(
             "created %s room id=%s (encryption + room_kind set in initial_state)", kind, room_id
         )
@@ -128,7 +143,8 @@ class RoomManager:
     # ─── session lifecycle (commands) ─────────────────────────────────────
 
     async def rename_session(self, room_id: str, title: str) -> None:
-        await self._set_state(room_id, "m.room.name", "", {"name": title})
+        await self._set_room_name(room_id, title)
+        self._auto_titles.pop(room_id, None)
 
     async def archive_session(self, room_id: str) -> None:
         # No native Matrix "archive" — tag low-priority (non-destructive). See
@@ -138,6 +154,44 @@ class RoomManager:
             f"/_matrix/client/v3/user/{self.gateway.user_id}/rooms/{room_id}/tags/m.lowpriority",
             {"order": 0.0},
         )
+
+    async def delete_session(self, room_id: str) -> None:
+        """Local Matrix delete: unlink from space, leave, then forget."""
+        if self.space_id:
+            await self._set_state(self.space_id, "m.space.child", room_id, {})
+        status, body = await self.gateway.request(
+            "POST", f"/_matrix/client/v3/rooms/{room_id}/leave", {}
+        )
+        if status >= 400:
+            logger.warning("leave %s failed: %s %s", room_id, status, body)
+        status, body = await self.gateway.request(
+            "POST", f"/_matrix/client/v3/rooms/{room_id}/forget", {}
+        )
+        if status >= 400:
+            logger.warning("forget %s failed: %s %s", room_id, status, body)
+        self._room_names.pop(room_id, None)
+        self._auto_titles.pop(room_id, None)
+
+    async def maybe_set_first_message_title(self, room_id: str, text: str) -> None:
+        title = derive_first_message_title(text)
+        if title is None:
+            return
+        current = await self._current_room_name(room_id)
+        if current != DEFAULT_SESSION_ROOM_NAME:
+            return
+        await self._set_room_name(room_id, title)
+        self._auto_titles[room_id] = title
+
+    async def maybe_apply_host_title(self, room_id: str, title: str) -> None:
+        candidate = " ".join(str(title).split()).strip()[:255]
+        if not candidate:
+            return
+        current = await self._current_room_name(room_id)
+        auto_title = self._auto_titles.get(room_id)
+        if current not in (DEFAULT_SESSION_ROOM_NAME, auto_title):
+            return
+        await self._set_room_name(room_id, candidate)
+        self._auto_titles.pop(room_id, None)
 
     # ─── discovery (deterministic, from the homeserver) ───────────────────
 
@@ -171,6 +225,11 @@ class RoomManager:
         """Read `chat4000.room_kind` out of a synced room's required_state and
         record the control room. Returns the kind, or None if unmarked."""
         for ev in required_state:
+            if ev.get("type") == "m.room.name" and ev.get("state_key", "") == "":
+                name = (ev.get("content") or {}).get("name")
+                if isinstance(name, str):
+                    self._room_names[room_id] = name
+        for ev in required_state:
             if ev.get("type") == ROOM_KIND and ev.get("state_key", "") == "":
                 kind = (ev.get("content") or {}).get("kind")
                 if kind == "control":
@@ -187,6 +246,27 @@ class RoomManager:
             child_room_id,
             {"via": [self.server_name]},
         )
+
+    async def _current_room_name(self, room_id: str) -> str | None:
+        if room_id in self._room_names:
+            return self._room_names[room_id]
+        status, body = await self.gateway.request(
+            "GET", f"/_matrix/client/v3/rooms/{room_id}/state/m.room.name/"
+        )
+        if status >= 400:
+            return None
+        name = body.get("name")
+        if isinstance(name, str):
+            self._room_names[room_id] = name
+            return name
+        return None
+
+    async def _set_room_name(self, room_id: str, title: str) -> None:
+        name = str(title).strip()[:255]
+        if not name:
+            return
+        await self._set_state(room_id, "m.room.name", "", {"name": name})
+        self._room_names[room_id] = name
 
     async def _set_state(
         self, room_id: str, etype: str, state_key: str, content: dict[str, Any]

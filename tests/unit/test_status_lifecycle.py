@@ -31,9 +31,26 @@ class _FakeTurnWriter:
         self._sink.append(("answer", text))
 
 
+class _FakeRooms:
+    def __init__(self) -> None:
+        self.first_titles: list[tuple[str, str]] = []
+        self.host_titles: list[tuple[str, str]] = []
+
+    async def maybe_set_first_message_title(self, room_id: str, text: str) -> None:
+        self.first_titles.append((room_id, text))
+
+    async def maybe_apply_host_title(self, room_id: str, title: str) -> None:
+        self.host_titles.append((room_id, title))
+
+
+class _FakeSession:
+    def __init__(self, rooms: _FakeRooms | None = None) -> None:
+        self.rooms = rooms
+
+
 def _adapter(sink: list[tuple[str, str, str]], loop: object = None) -> Chat4000MatrixAdapter:
     a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
-    a._session = object()  # truthy / not-None
+    a._session = _FakeSession()  # truthy / not-None
     a._question_id = {}
     a._status_state = {}
     a._status_task = {}
@@ -168,3 +185,19 @@ def test_room_for_session_routes_by_session_not_global() -> None:
     assert a._room_for_session("agent:main:chat4000:dm:!gone") is None
     # Empty session id → None too (no crash, no misroute).
     assert a._room_for_session("") is None
+
+
+async def test_first_message_title_delegates_to_rooms() -> None:
+    rooms = _FakeRooms()
+    a = _adapter([])
+    a._session = _FakeSession(rooms)  # type: ignore[assignment]
+    await a._maybe_set_first_message_title("!r", "Please fix login. It fails")
+    assert rooms.first_titles == [("!r", "Please fix login. It fails")]
+
+
+async def test_host_title_callback_delegates_to_rooms() -> None:
+    rooms = _FakeRooms()
+    a = _adapter([])
+    a._session = _FakeSession(rooms)  # type: ignore[assignment]
+    await a._apply_host_session_title("!r", "AI title")
+    assert rooms.host_titles == [("!r", "AI title")]

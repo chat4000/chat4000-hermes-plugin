@@ -13,6 +13,7 @@ class FakeRooms:
         self.invited: list = []
         self.renamed: list = []
         self.archived: list = []
+        self.deleted: list = []
 
     async def create_session_room(self, title, agent_id):
         self.created.append((title, agent_id))
@@ -32,6 +33,9 @@ class FakeRooms:
 
     async def archive_session(self, room):
         self.archived.append(room)
+
+    async def delete_session(self, room):
+        self.deleted.append(room)
 
 
 class FakeCrypto:
@@ -75,6 +79,22 @@ async def test_session_rename_requires_args():
     await CommandHandler(s).handle("!control:hs", "session.rename", {"room_id": "!r:hs"})
     _, content, _ = s.crypto.sent[-1]
     assert content["ok"] is False
+
+
+async def test_session_new_defaults_to_new_chat():
+    s = FakeSession()
+    await CommandHandler(s).handle("!control:hs", "session.new", {})
+    assert s.rooms.created == [("New chat", "main")]
+
+
+async def test_session_delete_leaves_forgets_and_replies():
+    s = FakeSession()
+    await CommandHandler(s).handle("!control:hs", "session.delete", {"room_id": "!old:hs"})
+    assert s.rooms.deleted == ["!old:hs"]
+    _, content, _ = s.crypto.sent[-1]
+    assert content["command"] == "session.delete"
+    assert content["ok"] is True
+    assert content["room_id"] == "!old:hs"
 
 
 async def test_plugin_update_is_refused():

@@ -22,6 +22,7 @@ the built pyvodozemac wheel).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -73,6 +74,7 @@ class Chat4000MatrixAdapter:
         # the source — and route tool events by it. An unresolved session DROPS the
         # chip (external_tool_start); there is deliberately NO global-room fallback.
         self._room_by_session: dict[str, str] = {}
+        self._session_by_room: dict[str, str] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._media: MediaClient | None = None  # built at connect
         self._connected = False
@@ -326,6 +328,8 @@ class Chat4000MatrixAdapter:
         # build_source / handle_message come from BasePlatformAdapter, mixed in at
         # register() time (see adapter._make_adapter_class) — invisible to mypy here.
         source = self.build_source(chat_id=room_id, user_id=sender, chat_type="dm")  # type: ignore[attr-defined]
+        if text:
+            await self._maybe_set_first_message_title(room_id, text)
         # Remember which room this Hermes session belongs to, so the tool hooks
         # (which only know the session_id) route their bubbles to THIS room even
         # while another session runs concurrently.
@@ -346,7 +350,7 @@ class Chat4000MatrixAdapter:
         # here, or idle fires ~150ms in (before the turn starts) and every later
         # tool/status callback no-ops.
         try:
-            await self.handle_message(event)  # type: ignore[attr-defined]
+            await self._handle_message_with_title_callback(event, room_id)
         except Exception as exc:  # noqa: BLE001
             # Dispatch itself failed → no background turn will run; clear the label
             # now and report. (A normal return means the turn is underway.)
@@ -522,10 +526,62 @@ class Chat4000MatrixAdapter:
                 thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
             )
             self._room_by_session[skey] = room_id
+            self._session_by_room[room_id] = skey
         except Exception as exc:  # noqa: BLE001
             from ..error_log import dump_chat4000_trace
 
             dump_chat4000_trace("matrix.session_room_map", exc)
+
+    async def _maybe_set_first_message_title(self, room_id: str, text: str) -> None:
+        if self._session is None or self._session.rooms is None:
+            return
+        await self._session.rooms.maybe_set_first_message_title(room_id, text)
+
+    async def _apply_host_session_title(self, room_id: str, title: str) -> None:
+        if self._session is None or self._session.rooms is None:
+            return
+        await self._session.rooms.maybe_apply_host_title(room_id, title)
+
+    def _schedule_host_session_title(self, room_id: str, title: str) -> None:
+        if self._loop is None or not self._loop.is_running():
+            return
+        coro = self._apply_host_session_title(room_id, title)
+        try:
+            on_loop_thread = asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            on_loop_thread = False
+        try:
+            if on_loop_thread:
+                self._loop.create_task(coro)
+            else:
+                asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except RuntimeError as exc:
+            logger.debug("could not schedule host session title: %s", exc)
+            coro.close()
+
+    async def _handle_message_with_title_callback(self, event: Any, room_id: str) -> None:  # noqa: ANN401
+        handle = self.handle_message  # type: ignore[attr-defined]
+        if not self._accepts_title_callback(handle):
+            await handle(event)
+            return
+
+        def title_callback(title: str) -> None:
+            self._schedule_host_session_title(room_id, title)
+
+        await handle(event, title_callback=title_callback)
+
+    @staticmethod
+    def _accepts_title_callback(handle: Any) -> bool:  # noqa: ANN401
+        try:
+            sig = inspect.signature(handle)
+        except (TypeError, ValueError):
+            return False
+        for param in sig.parameters.values():
+            if param.kind is inspect.Parameter.VAR_KEYWORD:
+                return True
+            if param.name == "title_callback":
+                return True
+        return False
 
     def _room_for_session(self, session_id: str) -> str | None:
         """Resolve which room a tool hook belongs to from its session_id, by
