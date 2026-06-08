@@ -25,6 +25,7 @@ import asyncio
 import inspect
 import logging
 import uuid
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..package_info import read_package_version
@@ -56,8 +57,20 @@ class _UnroutableToolStart(Exception):
     the chip rather than misroute it to a stale, wrong-room guess."""
 
 
+@dataclass
+class _PendingTurn:
+    """Matrix answer anchor awaiting the one push-eligible final edit."""
+
+    anchor_id: str
+    latest_text: str
+    finalized: bool = False
+
+
 class Chat4000MatrixAdapter:
     """Bound at register() time to BasePlatformAdapter (see adapter._make_adapter_class)."""
+
+    SUPPORTS_MESSAGE_EDITING = True
+    MAX_MESSAGE_LENGTH = 4096
 
     def __init__(self, config: Any, **kwargs: Any) -> None:  # noqa: ANN401  # Hermes host config/kwargs (untyped host objects)
         from gateway.config import Platform
@@ -83,6 +96,7 @@ class Chat4000MatrixAdapter:
         self._question_id: dict[str, str] = {}
         self._status_state: dict[str, str] = {}
         self._status_task: dict[str, asyncio.Task[None]] = {}
+        self._pending_turns: dict[str, _PendingTurn] = {}
         # Users already invited this connection + the background watcher that
         # live-invites anyone who pairs AFTER the gateway is up (no restart).
         self._invited: set[str] = set()
@@ -373,15 +387,45 @@ class Chat4000MatrixAdapter:
 
         if self._session is None:
             return SendResult(success=False, error="not connected")
-        text = content if isinstance(content, str) else (content or {}).get("text", "")
+        text = self._content_text(content)
         if not text:
             return SendResult(success=True, message_id="")
         tw = self._tw(chat_id)
         anchor = await tw.start_turn(chat_id)
         if anchor:
-            await tw.stream_edit(chat_id, anchor, str(text), final=True)
-        await self._end_status(chat_id)  # idle (flush above already closed the tools)
+            final = not self._turn_is_active(chat_id)
+            await tw.stream_edit(chat_id, anchor, text, final=final)
+            if not final:
+                self._pending_turns[chat_id] = _PendingTurn(anchor_id=anchor, latest_text=text)
         return SendResult(success=True, message_id=anchor or "")
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+        metadata: Any = None,  # noqa: ANN401  # accepted for Hermes stream-consumer compat
+    ) -> Any:  # noqa: ANN401  # returns Hermes host SendResult (untyped host type)
+        from gateway.platforms.base import SendResult
+
+        if self._session is None:
+            return SendResult(success=False, error="not connected")
+        text = self._content_text(content)
+        if not text:
+            return SendResult(success=True, message_id=message_id)
+
+        await self._tw(chat_id).stream_edit(chat_id, message_id, text, final=False)
+        if self._turn_is_active(chat_id):
+            pending = self._pending_turns.get(chat_id)
+            if pending is None or pending.anchor_id != message_id:
+                pending = _PendingTurn(anchor_id=message_id, latest_text=text)
+                self._pending_turns[chat_id] = pending
+            else:
+                pending.latest_text = text
+                pending.finalized = False
+        return SendResult(success=True, message_id=message_id)
 
     # ─── live activity (chat4000.status — protocol e3d9358) ────────────────
     #
@@ -453,8 +497,18 @@ class Chat4000MatrixAdapter:
         return None
 
     async def stop_typing(self, chat_id: str) -> None:
-        """Hermes' turn-end hook — clear the activity label (chat4000.status idle)."""
+        """Hermes' turn-end hook: finalize the answer push, then clear activity."""
+        finalize_error: Exception | None = None
+        try:
+            await self._finalize_pending_turn(chat_id)
+        except Exception as exc:  # noqa: BLE001
+            from ..error_log import dump_chat4000_trace
+
+            finalize_error = exc
+            dump_chat4000_trace("matrix.finalize_turn", exc, {"room_id": chat_id})
         await self._end_status(chat_id)
+        if finalize_error is not None:
+            raise finalize_error
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": f"chat4000 ({chat_id[:8]}…)", "type": "dm", "chat_id": chat_id}
@@ -541,6 +595,35 @@ class Chat4000MatrixAdapter:
         if self._session is None or self._session.rooms is None:
             return
         await self._session.rooms.maybe_apply_host_title(room_id, title)
+
+    async def _finalize_pending_turn(self, room_id: str) -> None:
+        pending = self._pending_turns.get(room_id)
+        if pending is None:
+            return
+        if pending.finalized:
+            self._pending_turns.pop(room_id, None)
+            return
+        if pending.latest_text:
+            await self._tw(room_id).stream_edit(
+                room_id, pending.anchor_id, pending.latest_text, final=True
+            )
+        pending.finalized = True
+        self._pending_turns.pop(room_id, None)
+
+    def _turn_is_active(self, room_id: str) -> bool:
+        if not self._question_id.get(room_id):
+            return False
+        return self._status_state.get(room_id) != "idle"
+
+    @staticmethod
+    def _content_text(content: Any) -> str:  # noqa: ANN401  # Hermes content can be str/dict/etc.
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            return str(content.get("text") or "")
+        if content is None:
+            return ""
+        return str(content)
 
     def _schedule_host_session_title(self, room_id: str, title: str) -> None:
         if self._loop is None or not self._loop.is_running():

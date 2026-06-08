@@ -11,24 +11,28 @@ drive the pure status methods with a fake turn writer.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import chat4000_hermes_plugin.matrix.hermes_adapter as ha
 from chat4000_hermes_plugin.matrix.hermes_adapter import Chat4000MatrixAdapter
 
+Record = tuple[Any, ...]
+
 
 class _FakeTurnWriter:
-    def __init__(self, sink: list[tuple[str, str, str]]) -> None:
+    def __init__(self, sink: list[Record]) -> None:
         self._sink = sink
 
     async def send_status(self, room_id: str, state: str, question_event_id: str) -> None:
         self._sink.append((room_id, state, question_event_id))
 
     async def start_turn(self, room_id):  # type: ignore[no-untyped-def]
-        self._sink.append(("start_turn", room_id))
-        return "$anchor"
+        anchor = f"$anchor-{1 + sum(1 for row in self._sink if row[0] == 'start_turn')}"
+        self._sink.append(("start_turn", room_id, anchor))
+        return anchor
 
     async def stream_edit(self, room_id, anchor, text, final=False):  # type: ignore[no-untyped-def]
-        self._sink.append(("answer", text))
+        self._sink.append(("answer", room_id, anchor, text, final))
 
 
 class _FakeRooms:
@@ -48,26 +52,43 @@ class _FakeSession:
         self.rooms = rooms
 
 
-def _adapter(sink: list[tuple[str, str, str]], loop: object = None) -> Chat4000MatrixAdapter:
+def _adapter(sink: list[Record], loop: object = None) -> Chat4000MatrixAdapter:
     a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
     a._session = _FakeSession()  # truthy / not-None
     a._question_id = {}
     a._status_state = {}
     a._status_task = {}
+    a._pending_turns = {}
     a._loop = loop  # type: ignore[assignment]
     a._tw = lambda room_id: _FakeTurnWriter(sink)  # type: ignore[method-assign,assignment]
     return a
 
 
+def _install_send_result(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import sys
+    import types
+
+    base = types.ModuleType("gateway.platforms.base")
+
+    class SendResult:
+        def __init__(self, success=True, message_id="", error=None):  # type: ignore[no-untyped-def]
+            self.success, self.message_id, self.error = success, message_id, error
+
+    base.SendResult = SendResult  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
+    monkeypatch.setitem(sys.modules, "gateway.platforms", types.ModuleType("gateway.platforms"))
+    monkeypatch.setitem(sys.modules, "gateway.platforms.base", base)
+
+
 async def test_no_status_without_a_question() -> None:
-    sink: list[tuple[str, str, str]] = []
+    sink: list[Record] = []
     a = _adapter(sink)
     await a._status("!r", "thinking")  # no question id recorded → nothing to reference
     assert sink == []
 
 
 async def test_status_sends_each_transition_no_dedup() -> None:
-    sink: list[tuple[str, str, str]] = []
+    sink: list[Record] = []
     a = _adapter(sink)
     a._question_id["!r"] = "$q"
     await a._status("!r", "thinking")
@@ -77,7 +98,7 @@ async def test_status_sends_each_transition_no_dedup() -> None:
 
 
 async def test_end_status_sends_idle_once_and_keeps_context() -> None:
-    sink: list[tuple[str, str, str]] = []
+    sink: list[Record] = []
     a = _adapter(sink)
     a._question_id["!r"] = "$q"
     await a._status("!r", "working")
@@ -92,7 +113,7 @@ async def test_end_status_sends_idle_once_and_keeps_context() -> None:
 
 
 async def test_stop_typing_clears_via_idle() -> None:
-    sink: list[tuple[str, str, str]] = []
+    sink: list[Record] = []
     a = _adapter(sink)
     a._question_id["!r"] = "$q"
     await a._status("!r", "typing")
@@ -101,7 +122,7 @@ async def test_stop_typing_clears_via_idle() -> None:
 
 
 async def test_send_typing_is_noop() -> None:
-    sink: list[tuple[str, str, str]] = []
+    sink: list[Record] = []
     a = _adapter(sink)
     a._question_id["!r"] = "$q"
     await a.send_typing("!r")  # native typing removed — must do nothing
@@ -110,7 +131,7 @@ async def test_send_typing_is_noop() -> None:
 
 async def test_keepalive_resends_then_stops(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(ha, "STATUS_KEEPALIVE_S", 0.01)
-    sink: list[tuple[str, str, str]] = []
+    sink: list[Record] = []
     a = _adapter(sink, asyncio.get_running_loop())
     a._question_id["!r"] = "$q"
     await a._status("!r", "working")  # initial send + starts the keep-alive task
@@ -128,7 +149,7 @@ async def test_followup_turn_status_survives_interrupted_turn_end() -> None:
     """Rapid follow-up: turn2 claims the room, then the interrupted turn1's
     _end_status fires. turn2's context must survive so its later reasoning/tool
     callbacks still emit (the no-thinking/no-tools bug)."""
-    sink: list[tuple[str, str, str]] = []
+    sink: list[Record] = []
     a = _adapter(sink)
     a._question_id["!r"] = "$q2"  # turn2's question now owns the room
     await a._status("!r", "thinking")  # turn2 opened
@@ -139,31 +160,83 @@ async def test_followup_turn_status_survives_interrupted_turn_end() -> None:
     assert ("!r", "working", "$q2") in sink
 
 
-async def test_send_emits_answer_then_idle(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """send() posts the answer (anchor + edit) then idle. START-only means there are
-    no tool ENDs to flush — send is just answer → idle."""
-    import sys
-    import types
-
-    base = types.ModuleType("gateway.platforms.base")
-
-    class SendResult:
-        def __init__(self, success=True, message_id="", error=None):  # type: ignore[no-untyped-def]
-            self.success, self.message_id, self.error = success, message_id, error
-
-    base.SendResult = SendResult  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
-    monkeypatch.setitem(sys.modules, "gateway.platforms", types.ModuleType("gateway.platforms"))
-    monkeypatch.setitem(sys.modules, "gateway.platforms.base", base)
-
-    sink: list[tuple[str, str, str]] = []
+async def test_active_send_pushes_only_when_stop_typing_fires(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """During a Hermes turn, send() opens the Matrix anchor with push:false.
+    stop_typing() is the real turn-end hook, so it sends the one push:true edit
+    and then idles."""
+    _install_send_result(monkeypatch)
+    sink: list[Record] = []
     a = _adapter(sink)
     a._question_id["!r"] = "$q"
+    await a._status("!r", "thinking")
+    sink.clear()
     await a.send("!r", "the answer")
-    kinds = [s[0] for s in sink]
-    assert ("answer", "the answer") in sink  # answer was sent
-    assert kinds.index("answer") < kinds.index("!r")  # then idle (the status tuple) last
+    assert ("answer", "!r", "$anchor-1", "the answer", False) in sink
+    assert ("answer", "!r", "$anchor-1", "the answer", True) not in sink
+    assert ("!r", "idle", "$q") not in sink
+
+    await a.stop_typing("!r")
+    assert ("answer", "!r", "$anchor-1", "the answer", True) in sink
     assert ("!r", "idle", "$q") in sink
+
+
+async def test_out_of_turn_send_still_pushes_immediately(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _install_send_result(monkeypatch)
+    sink: list[Record] = []
+    a = _adapter(sink)
+    await a.send("!r", "system notice")
+    assert ("answer", "!r", "$anchor-1", "system notice", True) in sink
+    assert a._pending_turns == {}
+
+
+async def test_edit_message_streams_without_pushing_until_stop_typing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _install_send_result(monkeypatch)
+    sink: list[Record] = []
+    a = _adapter(sink)
+    a._question_id["!r"] = "$q"
+    await a._status("!r", "thinking")
+    sink.clear()
+
+    sent = await a.send("!r", "part")
+    await a.edit_message("!r", sent.message_id, "full answer", finalize=True)
+    assert ("answer", "!r", "$anchor-1", "full answer", False) in sink
+    assert ("answer", "!r", "$anchor-1", "full answer", True) not in sink
+
+    await a.stop_typing("!r")
+    assert ("answer", "!r", "$anchor-1", "full answer", True) in sink
+
+
+async def test_tool_boundary_finalize_does_not_create_push(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _install_send_result(monkeypatch)
+    sink: list[Record] = []
+    a = _adapter(sink)
+    a._question_id["!r"] = "$q"
+    await a._status("!r", "thinking")
+    sink.clear()
+
+    first = await a.send("!r", "I will check")
+    await a.edit_message("!r", first.message_id, "I will check", finalize=True)
+    second = await a.send("!r", "Final answer")
+    await a.stop_typing("!r")
+
+    assert second.message_id == "$anchor-2"
+    assert ("answer", "!r", "$anchor-1", "I will check", True) not in sink
+    assert ("answer", "!r", "$anchor-2", "Final answer", True) in sink
+
+
+async def test_stop_typing_finalizes_pending_turn_once(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _install_send_result(monkeypatch)
+    sink: list[Record] = []
+    a = _adapter(sink)
+    a._question_id["!r"] = "$q"
+    await a._status("!r", "thinking")
+    sink.clear()
+
+    await a.send("!r", "done")
+    await a.stop_typing("!r")
+    await a.stop_typing("!r")
+    final_edits = [row for row in sink if row == ("answer", "!r", "$anchor-1", "done", True)]
+    assert final_edits == [("answer", "!r", "$anchor-1", "done", True)]
 
 
 def test_room_for_session_routes_by_session_not_global() -> None:
