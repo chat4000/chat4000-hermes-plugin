@@ -61,6 +61,7 @@ def _make_adapter_class() -> type:
 def register(ctx: Any) -> None:  # noqa: ANN401  # Hermes host plugin context (untyped host object)
     """Plugin entry point — Hermes' loader calls this once on discovery."""
     from . import analytics
+    from .html_card_tool import register_html_card_tool
     from .plugin_hooks import register_plugin_hooks
     from .telemetry import initialize_chat4000_telemetry
 
@@ -76,6 +77,7 @@ def register(ctx: Any) -> None:  # noqa: ANN401  # Hermes host plugin context (u
     # Tool bubbles: route Hermes' pre_tool_call to the active adapter's
     # external_tool_start (START-only chat4000.tool events). Self-filters by session.
     register_plugin_hooks(ctx)
+    register_html_card_tool(ctx)
     analytics.set_person_properties(
         {
             "plugin_version": analytics.PACKAGE_VERSION,

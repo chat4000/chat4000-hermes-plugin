@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 TOOL_MSGTYPE = "chat4000.tool"
 STATUS_EVENT_TYPE = "chat4000.status"
+HTML_CARD_EVENT_TYPE = "chat4000.html_card"
 
 # Per protocol.md E, the tool event content is tiny: tool_id <=64, name <=64,
 # icon <=16. Cap defensively so a pathological name/icon can't bloat the event.
@@ -94,6 +95,24 @@ class TurnWriter:
             {"msgtype": TOOL_MSGTYPE, TOOL_MSGTYPE: tool},
             self._members,
             push=False,
+        )
+
+    # ─── HTML cards (typed final-answer event, never streamed/edited) ─────
+
+    async def html_card(self, room_id: str, *, html: str) -> str | None:
+        """Protocol E: send a complete HTML card as the turn's final answer.
+
+        The decrypted event is exactly:
+        {"type":"chat4000.html_card","content":{"html":"..."}}
+
+        No msgtype/body/fallback/title/kind/version fields, no m.replace edit, and
+        push:true because this event is the sole final-answer surface."""
+        return await self._c.send_room_event(
+            room_id,
+            HTML_CARD_EVENT_TYPE,
+            {"html": html},
+            self._members,
+            push=True,
         )
 
     # ─── live activity (chat4000.status — encrypted timeline event) ───────

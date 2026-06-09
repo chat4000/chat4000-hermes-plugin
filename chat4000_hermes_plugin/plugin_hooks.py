@@ -49,6 +49,30 @@ def _adapter_for_session(session_id: str) -> Chat4000MatrixAdapter | None:
     return None
 
 
+def connected_adapter_for_room(room: str, session_id: str = "") -> Chat4000MatrixAdapter | None:
+    """Return the connected adapter that owns this Chat4000 turn room."""
+    candidates = [
+        adapter for adapter in list(_ACTIVE_ADAPTERS) if getattr(adapter, "_connected", False)
+    ]
+    if not room or not candidates:
+        return None
+
+    for adapter in candidates:
+        resolver = getattr(adapter, "_room_for_session", None)
+        if callable(resolver) and session_id and resolver(session_id) == room:
+            return adapter
+
+    for adapter in candidates:
+        by_session = getattr(adapter, "_room_by_session", {})
+        if isinstance(by_session, dict) and room in by_session.values():
+            return adapter
+        by_room = getattr(adapter, "_session_by_room", {})
+        if isinstance(by_room, dict) and room in by_room:
+            return adapter
+
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _current_chat_id() -> str:
     """The current turn's chat_id (== room_id for Matrix), read from Hermes'
     task-local session ContextVar. This is how concurrent turns stay isolated:
@@ -128,6 +152,11 @@ def on_pre_tool_call(
     """START-ONLY (protocol E): emit ONE chat4000.tool event when a tool starts.
     There is no post_tool_call END and no round-boundary flush — the event is
     fire-and-forget, so no correlation/queue is needed."""
+    from .html_card_tool import HTML_CARD_TOOL_NAME
+
+    if tool_name == HTML_CARD_TOOL_NAME:
+        return
+
     adapter = _adapter_for_session(session_id or task_id)
     if adapter is None:
         return

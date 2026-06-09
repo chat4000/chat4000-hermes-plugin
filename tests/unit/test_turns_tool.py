@@ -60,3 +60,21 @@ async def test_tool_start_omits_icon_when_empty_and_caps_sizes() -> None:
     tool = c.sends[-1]["content"]["chat4000.tool"]
     assert "icon" not in tool  # empty icon → omitted entirely
     assert len(tool["name"]) == 64  # name capped to 64 (TOOL_NAME_MAX)
+
+
+async def test_html_card_is_typed_final_answer_event() -> None:
+    c = _FakeCrypto()
+    html = "<article><p>Done</p></article>"
+    await _writer(c).html_card("!r", html=html)
+
+    s = c.sends[-1]
+    assert s["event_type"] == "chat4000.html_card"
+    assert s["content"] == {"html": html}
+    assert s["push"] is True
+    assert s["relates_to"] is None
+    assert "msgtype" not in s["content"]
+    assert "body" not in s["content"]
+    assert "fallback" not in s["content"]
+    assert "title" not in s["content"]
+    assert "kind" not in s["content"]
+    assert "version" not in s["content"]

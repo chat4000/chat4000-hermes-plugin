@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 import chat4000_hermes_plugin.plugin_hooks as h
+from chat4000_hermes_plugin.html_card_tool import HTML_CARD_TOOL_NAME
 
 
 class FakeAdapter:
@@ -77,6 +78,24 @@ async def test_non_chat4000_session_is_ignored():
     _clear()  # s9 NOT registered as chat4000
     try:
         h.on_pre_tool_call(tool_name="bash", args={}, task_id="t9", session_id="s9")
+        await _drain()
+        assert a.started == []
+    finally:
+        h.deregister_active_adapter(a)
+        _clear()
+
+
+async def test_html_card_tool_does_not_emit_visible_tool_chip():
+    a = FakeAdapter(asyncio.get_running_loop())
+    h.register_active_adapter(a)
+    _clear()
+    h._SESSION_PLATFORM["s1"] = "chat4000"
+    try:
+        h.on_pre_tool_call(
+            tool_name=HTML_CARD_TOOL_NAME,
+            args={"html": "<article>x</article>"},
+            session_id="s1",
+        )
         await _drain()
         assert a.started == []
     finally:

@@ -14,7 +14,7 @@ drive `external_tool_start` with stubs.
 from __future__ import annotations
 
 import chat4000_hermes_plugin.error_log as error_log
-from chat4000_hermes_plugin.matrix.hermes_adapter import Chat4000MatrixAdapter
+from chat4000_hermes_plugin.matrix.hermes_adapter import Chat4000MatrixAdapter, _PendingTurn
 
 
 class _FakeTurnWriter:
@@ -25,12 +25,24 @@ class _FakeTurnWriter:
         self._sink.append((room_id, tool_id, name, icon))
         return "$ev"
 
+    async def html_card(self, room_id, *, html):  # type: ignore[no-untyped-def]
+        self._sink.append(("html_card", room_id, html))
+        return "$card"
+
+    async def stream_edit(self, room_id, anchor_id, text, *, final):  # type: ignore[no-untyped-def]
+        self._sink.append(("stream_edit", room_id, anchor_id, text, final))
+        return "$edit"
+
 
 def _adapter(sink: list, *, session: object | None) -> Chat4000MatrixAdapter:
     a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
     a._session = session  # type: ignore[assignment]
     a._room_by_session = {}
+    a._session_by_room = {}
     a._active_room = None
+    a._question_id = {}
+    a._pending_turns = {}
+    a._html_card_finalized_for_question = {}
     a._tw = lambda room_id: _FakeTurnWriter(sink)  # type: ignore[method-assign,assignment]
 
     async def _status(room_id, state):  # type: ignore[no-untyped-def]
@@ -93,3 +105,24 @@ async def test_not_connected_returns_empty_without_reporting(monkeypatch) -> Non
     assert out == ""
     assert sink == []
     assert reports == []  # not-connected is benign — must NOT report
+
+
+async def test_html_card_marks_turn_final_and_suppresses_text_finalizer() -> None:
+    sink: list = []
+    a = _adapter(sink, session=object())
+    a._question_id = {"!r": "$q"}
+    a._room_by_session = {"s1": "!r"}
+    a._session_by_room = {"!r": "s1"}
+    a._pending_turns = {"!r": _PendingTurn(anchor_id="$anchor", latest_text="duplicate")}
+
+    event_id = await a.external_html_card(
+        "<article><p>Done</p></article>",
+        room="!r",
+        session_id="s1",
+    )
+    await a._finalize_pending_turn("!r")
+
+    assert event_id == "$card"
+    assert ("html_card", "!r", "<article><p>Done</p></article>") in sink
+    assert not any(item[0] == "stream_edit" for item in sink)
+    assert a._pending_turns == {}

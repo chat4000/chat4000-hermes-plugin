@@ -97,6 +97,7 @@ class Chat4000MatrixAdapter:
         self._status_state: dict[str, str] = {}
         self._status_task: dict[str, asyncio.Task[None]] = {}
         self._pending_turns: dict[str, _PendingTurn] = {}
+        self._html_card_finalized_for_question: dict[str, str] = {}
         # Users already invited this connection + the background watcher that
         # live-invites anyone who pairs AFTER the gateway is up (no restart).
         self._invited: set[str] = set()
@@ -304,6 +305,7 @@ class Chat4000MatrixAdapter:
         # decrypt can take several seconds, and firing the label first means the user
         # sees immediate feedback instead of a silent gap during that fetch.
         if event_id:
+            self._html_card_finalized_for_question.pop(room_id, None)
             self._question_id[room_id] = event_id
             await self._status(room_id, "thinking")
 
@@ -392,6 +394,8 @@ class Chat4000MatrixAdapter:
         text = self._content_text(content)
         if not text:
             return SendResult(success=True, message_id="")
+        if self._html_card_finalized(room_id=chat_id):
+            return SendResult(success=True, message_id="")
         tw = self._tw(chat_id)
         anchor = await tw.start_turn(chat_id)
         if anchor:
@@ -416,6 +420,8 @@ class Chat4000MatrixAdapter:
             return SendResult(success=False, error="not connected")
         text = self._content_text(content)
         if not text:
+            return SendResult(success=True, message_id=message_id)
+        if self._html_card_finalized(room_id=chat_id):
             return SendResult(success=True, message_id=message_id)
 
         await self._tw(chat_id).stream_edit(chat_id, message_id, text, final=False)
@@ -564,6 +570,31 @@ class Chat4000MatrixAdapter:
         await self._status(room, "working")
         return tool_id
 
+    async def external_html_card(self, html: str, *, session_id: str = "", room: str = "") -> str:
+        """Send the Chat4000-specific HTML-card final-answer event.
+
+        Called only by the internal `chat4000_send_html_card` plugin tool after it
+        has verified the Hermes session context is a Chat4000 gateway turn. The
+        card event itself is the visible result, so this method marks the room's
+        current turn as card-finalized; later text sends/edits and the turn-end
+        finalizer become no-ops for that same question."""
+        room = room or self._room_for_session(session_id) or ""
+        if self._session is None or not room or not html:
+            return ""
+
+        event_id = await self._tw(room).html_card(room, html=html)
+        if not event_id:
+            return ""
+
+        self._html_card_finalized_for_question[room] = self._question_id.get(room, "")
+        logger.debug(
+            "html card final answer: room=%s session=%s event=%s",
+            room,
+            session_id,
+            event_id,
+        )
+        return event_id
+
     # ─── helpers ──────────────────────────────────────────────────────────
 
     def _remember_session_room(self, source: Any, room_id: str) -> None:  # noqa: ANN401  # Hermes SessionSource
@@ -602,6 +633,9 @@ class Chat4000MatrixAdapter:
         pending = self._pending_turns.get(room_id)
         if pending is None:
             return
+        if self._html_card_finalized(room_id=room_id):
+            self._pending_turns.pop(room_id, None)
+            return
         if pending.finalized:
             self._pending_turns.pop(room_id, None)
             return
@@ -626,6 +660,12 @@ class Chat4000MatrixAdapter:
         if content is None:
             return ""
         return str(content)
+
+    def _html_card_finalized(self, *, room_id: str) -> bool:
+        marker = self._html_card_finalized_for_question.get(room_id)
+        if marker is None:
+            return False
+        return marker == self._question_id.get(room_id, "")
 
     def _schedule_host_session_title(self, room_id: str, title: str) -> None:
         if self._loop is None or not self._loop.is_running():

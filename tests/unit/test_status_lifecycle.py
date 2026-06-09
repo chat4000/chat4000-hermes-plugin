@@ -56,6 +56,7 @@ def _adapter(sink: list[Record], loop: object = None) -> Chat4000MatrixAdapter:
     a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
     a._session = _FakeSession()  # truthy / not-None
     a._question_id = {}
+    a._html_card_finalized_for_question = {}
     a._status_state = {}
     a._status_task = {}
     a._pending_turns = {}
