@@ -10,15 +10,12 @@ through `chat4000_hermes_plugin/__init__.py` via the
 `hermes_agent.plugins` entry-point — see pyproject.toml.
 """
 
-try:
+import contextlib
+
+with contextlib.suppress(ImportError):
     # Hermes loads this file via spec_from_file_location with the plugin
     # dir on submodule_search_locations, so the relative subpackage
     # `chat4000_hermes_plugin` resolves cleanly.
     from .chat4000_hermes_plugin.adapter import register  # noqa: F401
-except ImportError:
-    # Loaded outside Hermes (e.g. pytest auto-discovery walking up from
-    # tests/ found this __init__.py). The pip-install path goes through
-    # chat4000_hermes_plugin/__init__.py instead — nothing to do here.
-    pass
 
 __all__ = ["register"] if "register" in dir() else []

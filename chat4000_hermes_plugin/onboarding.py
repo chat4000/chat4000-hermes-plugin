@@ -9,13 +9,19 @@ its rooms BEFORE anyone pairs — and is reused by `chat4000 pair` / `prepare`.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from .matrix.creds_store import BotCreds, load_bot_creds, save_bot_creds
+
+if TYPE_CHECKING:
+    from .matrix.registrar_client import RegistrarClient
 
 logger = logging.getLogger(__name__)
 
 
-async def ensure_onboarded(account: str = "default") -> BotCreds | None:
+async def ensure_onboarded(
+    account: str = "default", registrar: RegistrarClient | None = None
+) -> BotCreds | None:
     """Return existing bot creds, or mint + save them via the registrar.
 
     Returns None if onboarding fails (caller decides whether that's fatal). The
@@ -25,12 +31,11 @@ async def ensure_onboarded(account: str = "default") -> BotCreds | None:
     if creds is not None:
         return creds
 
-    # Lazy imports: cli pulls in click and is the owner of env/registrar
-    # resolution; importing it at module load would be heavy + circular.
     from . import analytics
-    from .cli import _gen_code, _registrar, _resolve_env
+    from .cli import _gen_code
+    from .registrar_config import build_registrar_client, resolve_env
 
-    reg = _registrar()
+    reg = registrar or build_registrar_client()
     redeemed = await reg.self_onboard(_gen_code(), device_name="hermes-plugin")
     creds = BotCreds(
         user_id=redeemed.user_id,
@@ -42,7 +47,7 @@ async def ensure_onboarded(account: str = "default") -> BotCreds | None:
     save_bot_creds(creds, account)
     logger.info("chat4000: self-onboarded bot identity %s", creds.user_id)
     try:
-        analytics.track("plugin_onboarded", {"env": _resolve_env(), "via": "boot"})
+        analytics.track("plugin_onboarded", {"env": resolve_env(), "via": "boot"})
     except Exception as exc:  # noqa: BLE001
         from .error_log import dump_chat4000_trace
 

@@ -48,6 +48,12 @@ class VersionVerdict:
     message: str | None
 
 
+@dataclass
+class PluginVersion:
+    current_version: str
+    source: str
+
+
 class RegistrarError(RuntimeError):
     def __init__(self, status: int, errcode: str, error: str) -> None:
         super().__init__(f"{status} {errcode}: {error}")
@@ -104,17 +110,25 @@ class RegistrarClient:
         return await self._get(f"/pair/status?code={code}", auth=True)
 
     async def version(
-        self, app_id: str, client_version: str, release_channel: str, platform: str = "linux"
+        self,
+        app_id: str,
+        client_version: str,
+        release_channel: str,
+        platform: str = "linux",
+        posthog_id: str | None = None,
     ) -> VersionVerdict:
         """C.5.1 — version policy check. Public."""
+        body = {
+            "app_id": app_id,
+            "client_version": client_version,
+            "release_channel": release_channel,
+            "platform": platform,
+        }
+        if posthog_id:
+            body["posthog_id"] = posthog_id[:64]
         r = await self._post(
             "/version",
-            {
-                "app_id": app_id,
-                "client_version": client_version,
-                "release_channel": release_channel,
-                "platform": platform,
-            },
+            body,
             auth=False,
         )
         return VersionVerdict(
@@ -123,6 +137,14 @@ class RegistrarClient:
             current_terms_version=r.get("current_terms_version"),
             message=r.get("message"),
         )
+
+    async def plugin_version(self, app_id: str, *, posthog_id: str | None = None) -> PluginVersion:
+        """C.5.2 — ask which exact plugin build and install source to run."""
+        body = {"app_id": app_id}
+        if posthog_id:
+            body["posthog_id"] = posthog_id[:64]
+        r = await self._post("/plugin-version", body, auth=True)
+        return PluginVersion(current_version=str(r["current_version"]), source=str(r["source"]))
 
     # ─── high-level flows ─────────────────────────────────────────────────
 

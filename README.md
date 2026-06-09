@@ -32,6 +32,7 @@ turns) and calls a small Rust binding for the crypto:
 - ✅ Tool-call bubbles (`chat4000.tool` events) + live status (`chat4000.status`)
 - ✅ Per-event push control (`chat4000.push`) — only the finished answer wakes you
 - ✅ Control-room session commands (`session.new` / `rename` / `archive`)
+- ✅ Control-room plugin self-update (`plugin.update_check` / `plugin.update`)
 - ✅ Anti-UTD sync discipline (persist room keys before `sync_ack`)
 
 ## Install
@@ -72,7 +73,8 @@ hermes gateway restart
 ## Known limitations / pushbacks (see MIGRATION.md)
 
 - Device verification / cross-signing not yet implemented (TOFU key sharing).
-- `plugin.update` is refused pending an owner model.
+- `plugin.update` runs the registrar-selected install script, then restarts Hermes
+  when requested.
 - Needs the deployed gateway to implement `sync_ack` (anti-UTD).
 
 ## Telemetry

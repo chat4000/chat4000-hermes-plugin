@@ -7,8 +7,11 @@ track directly so capture works regardless.)
 
 from __future__ import annotations
 
+import contextlib
+
 import chat4000_hermes_plugin.analytics as analytics_mod
 import chat4000_hermes_plugin.cli as cli
+import chat4000_hermes_plugin.telemetry as telemetry_mod
 from chat4000_hermes_plugin.matrix.registrar_client import (
     RedeemResult,
     RegistrarError,
@@ -17,7 +20,11 @@ from chat4000_hermes_plugin.matrix.registrar_client import (
 
 
 class _OkReg:
+    def __init__(self):
+        self.version_calls: list = []
+
     async def version(self, *a, **k):
+        self.version_calls.append((a, k))
         return VersionVerdict("ok", None, 1, None)
 
     async def self_onboard(self, code, device_name="x"):
@@ -52,9 +59,14 @@ def _capture(monkeypatch):
 
 async def test_full_funnel_on_success(monkeypatch):
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
-    monkeypatch.setattr(cli, "_registrar", lambda: _OkReg())
+    monkeypatch.setattr(telemetry_mod, "_resolve_install_id", lambda: "test-install-id")
+    reg = _OkReg()
+    monkeypatch.setattr(cli, "_registrar", lambda: reg)
     events = _capture(monkeypatch)
     await cli._run_pair("default")
+    assert reg.version_calls == [
+        (("@chat4000/hermes-plugin", "1.1.0", "production"), {"posthog_id": "test-install-id"})
+    ]
     for expected in (
         "pairing_started",
         "plugin_onboarded",
@@ -89,9 +101,7 @@ async def test_registrar_down_fires_version_check_failed(monkeypatch):
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
     monkeypatch.setattr(cli, "_registrar", lambda: _Down502Reg())
     events = _capture(monkeypatch)
-    try:
+    with contextlib.suppress(RegistrarError):
         await cli._run_pair("default")
-    except RegistrarError:
-        pass  # propagates to _handle_cli_error in the real CLI
     assert "pairing_started" in events
     assert "version_check_failed" in events

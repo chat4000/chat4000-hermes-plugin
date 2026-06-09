@@ -26,14 +26,14 @@ plan in `../chat4000-pyvodozemac/PLAN.md`.
   splicing. **Tested (incl. the anti-UTD ordering invariant).**
 - `matrix/rooms.py` — space + control/session rooms, `chat4000.room_kind`,
   `m.room.encryption`, invites, rename/archive.
-- `matrix/turns.py` — turn anchor, `m.replace` streaming, `chat4000.tool` events
-  (2 sends/tool), `chat4000.status`, full `chat4000.push` discipline.
+- `matrix/turns.py` — turn anchor, `m.replace` streaming, START-only
+  `chat4000.tool` events, `chat4000.status`, full `chat4000.push` discipline.
 - `matrix/creds_store.py` — bot-creds + crypto-store paths (replaces the v1
   group-key file).
 - `matrix/session.py` — orchestrator: build stack, sync loop, **command-boundary
   routing** (commands control-room-only). **Tested.**
-- `matrix/commands.py` — `session.*` + `plugin.update_check`; `plugin.update`
-  refused (X4). **Tested.**
+- `matrix/commands.py` — `session.*` + registrar-backed `plugin.update_check`;
+  `plugin.update` runs the registrar-selected install script. **Tested.**
 - `matrix/hermes_adapter.py` — capstone: BasePlatformAdapter over MatrixSession;
   inbound → `handle_message`, replies → TurnWriter streaming/tools, typing →
   status. (Hermes-runtime-coupled; not unit-tested offline.)
@@ -41,8 +41,8 @@ plan in `../chat4000-pyvodozemac/PLAN.md`.
   HTTP upload/download on the gateway-host media path. Inbound `m.image`/`m.audio`
   wired into the adapter (download→decrypt→cache→vision/STT). **Tested (round-trip
   + tamper rejection).**
-- `plugin_hooks.py` — reworked for v2: pre/post_tool_call → adapter
-  `external_tool_*` → `chat4000.tool` events + orphan sweep. **Tested.**
+- `plugin_hooks.py` — reworked for v2: `pre_tool_call` → adapter
+  `external_tool_start` → one START-only `chat4000.tool` event. **Tested.**
 
 ## Done (entry + pairing wired)
 
@@ -57,8 +57,6 @@ plan in `../chat4000-pyvodozemac/PLAN.md`.
 
 ## TODO (remaining / P5–P7)
 
-- `plugin_hooks.py` — if Hermes' standard runner doesn't fire the reply-pipeline
-  tool hooks, route `pre/post_tool_call` to the adapter's TurnWriter (tool bubbles).
 - Delete the v1 modules (below) + their tests; add `chat4000-pyvodozemac` to deps.
 - Build the `chat4000-pyvodozemac` wheel (first networked `cargo build`).
 
@@ -79,6 +77,6 @@ Their unit tests go with them.
 ## Pushbacks to backend (blocking/limiting)
 
 X1 no cross-signing (key-share device-injection), X2 shared service token on user
-machines, X3 bot-token rotation destroys identity, X4 `plugin.update` owner model
-undefined (feature deferred), X-sync-ack deployed gateway lacks `sync_ack`
-(auto-advances cursor → UTD), X5 streaming-edits vs 900 msg/min + storage.
+machines, X3 bot-token rotation destroys identity, X-sync-ack deployed gateway
+lacks `sync_ack` (auto-advances cursor → UTD), and X5 streaming-edits vs
+900 msg/min plus storage.

@@ -73,8 +73,8 @@ def register(ctx: Any) -> None:  # noqa: ANN401  # Hermes host plugin context (u
 
     suppress_telegram_polling_conflict()
 
-    # Tool bubbles: route Hermes' pre/post_tool_call to the active adapter's
-    # external_tool_* (chat4000.tool events). Self-filters by session.
+    # Tool bubbles: route Hermes' pre_tool_call to the active adapter's
+    # external_tool_start (START-only chat4000.tool events). Self-filters by session.
     register_plugin_hooks(ctx)
     analytics.set_person_properties(
         {

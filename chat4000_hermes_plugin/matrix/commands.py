@@ -6,12 +6,13 @@ in the same room.
 
   session.new      → create an encrypted session room, invite the user, reply room_id
   session.rename   → set m.room.name
-  session.archive  → tag low-priority
-  plugin.update_check → read-only version report
-  plugin.update    → DEFERRED (owner model undefined, pushback X4) → ok:false
+  session.delete   → unlink from space, leave, forget
+  session.archive  → legacy low-priority tag
+  plugin.update_check → registrar plugin-version lookup (read-only)
+  plugin.update    → run the registrar-supplied install script, then restart
 
-`plugin.update` is owner-gated; until the registrar gives us a way to establish
-and prove an owner identity, we refuse it with a clear error rather than guess.
+Authorization is control-room membership. The session layer enforces the command
+boundary before this handler runs; there is no separate owner/admin role.
 """
 
 from __future__ import annotations
@@ -19,25 +20,43 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import secrets
+import stat
+import subprocess
+import sys
+import tempfile
 import time
+import urllib.error
+import urllib.request
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlparse
 
 from .registrar_client import RegistrarError
 from .rooms import DEFAULT_SESSION_ROOM_NAME
 
 if TYPE_CHECKING:
     from .crypto_driver import CryptoDriver
+    from .registrar_client import PluginVersion
     from .rooms import RoomManager
     from .session import MatrixSession
 
 logger = logging.getLogger(__name__)
+
+APP_ID = "@chat4000/hermes-plugin"
+INSTALL_SCRIPT_TIMEOUT_S = 300.0
+RESTART_DELAY_S = 10.0
 DEVICE_PAIR_TTL_SECONDS = 120
 PAIR_STATUS_POLL_INTERVAL_S = 1.5
 
 
-class DevicePairRegistrarClient(Protocol):
+class RegistrarCommandClient(Protocol):
+    async def plugin_version(
+        self, app_id: str, *, posthog_id: str | None = None
+    ) -> PluginVersion: ...
+
     async def register(
         self,
         code: str,
@@ -49,6 +68,20 @@ class DevicePairRegistrarClient(Protocol):
     ) -> dict[str, Any]: ...
 
     async def status(self, code: str) -> dict[str, Any]: ...
+
+
+InstallerRunner = Callable[[str], Awaitable[None]]
+RestartScheduler = Callable[[], None]
+
+
+class InstallScriptError(RuntimeError):
+    """The registrar-supplied install script could not be fetched or run."""
+
+
+@dataclass(frozen=True)
+class UpdateTarget:
+    version: str
+    source: str
 
 
 @dataclass
@@ -65,14 +98,18 @@ class CommandHandler:
         self,
         session: MatrixSession,
         *,
-        owner_user_id: str | None = None,
         version: str = "0.0.0",
-        registrar: DevicePairRegistrarClient | None = None,
+        registrar: RegistrarCommandClient | None = None,
+        posthog_id: str | None = None,
+        installer_runner: InstallerRunner | None = None,
+        restart_scheduler: RestartScheduler | None = None,
     ) -> None:
         self._s = session
-        self._owner = owner_user_id
         self._version = version
         self._registrar = registrar
+        self._posthog_id = posthog_id
+        self._installer_runner = installer_runner or run_install_script
+        self._restart_scheduler = restart_scheduler or schedule_gateway_restart
         self._pairings: dict[str, PendingPairing] = {}
 
     @property
@@ -276,35 +313,103 @@ class CommandHandler:
             control, "m.room.message", content, self._s.recipients(control), push=False
         )
 
-    def _registrar_client(self) -> DevicePairRegistrarClient:
-        if self._registrar is not None:
-            return self._registrar
-        from ..cli import _registrar
-
-        return _registrar()
-
     async def _update_check(self) -> None:
-        # Read-only. We don't (yet) resolve a latest version or restart method —
-        # report current + not-updatable until plugin.update is designed (X4).
+        target = await self._update_target()
+        blockers = self._update_blockers(target)
+        needs_update = self._version != target.version
         await self._reply(
             "plugin.update_check",
             {
                 "ok": True,
                 "current_version": self._version,
-                "latest_version": self._version,
-                "updatable": False,
-                "restart_method": "unknown",
-                "blockers": ["plugin.update not implemented (owner model undefined — X4)"],
+                "latest_version": target.version,
+                "updatable": needs_update and not blockers,
+                "restart_method": "gateway-process",
+                "source": target.source,
+                "blockers": blockers,
             },
         )
 
     async def _update(self, content: dict[str, Any]) -> None:
-        # Owner-gated remote code update over chat. Deferred until the registrar
-        # defines owner establishment/proof (X4). Refuse cleanly.
+        target = await self._update_target()
+        requested = str(content.get("version") or target.version)
+        if len(requested) > 32:
+            await self._reply("plugin.update", {"ok": False, "error": "version too long"})
+            return
+        if requested != target.version:
+            await self._reply(
+                "plugin.update",
+                {
+                    "ok": False,
+                    "error": f"requested version {requested!r} is not the registrar target",
+                    "latest_version": target.version,
+                },
+            )
+            return
+        blockers = self._update_blockers(target)
+        if blockers:
+            await self._reply("plugin.update", {"ok": False, "error": "; ".join(blockers)})
+            return
+
+        restart_value = content.get("restart", True)
+        if not isinstance(restart_value, bool):
+            await self._reply("plugin.update", {"ok": False, "error": "restart must be boolean"})
+            return
+        restart_requested = restart_value
+        if self._version == target.version:
+            await self._reply(
+                "plugin.update",
+                {
+                    "ok": True,
+                    "from_version": self._version,
+                    "to_version": target.version,
+                    "installed": False,
+                    "restart_scheduled": False,
+                    "source": target.source,
+                },
+            )
+            return
+
+        await self._installer_runner(target.source)
+        restart_scheduled = False
+        if restart_requested:
+            self._restart_scheduler()
+            restart_scheduled = True
         await self._reply(
             "plugin.update",
-            {"ok": False, "error": "plugin.update is not supported yet (owner model undefined)"},
+            {
+                "ok": True,
+                "from_version": self._version,
+                "to_version": target.version,
+                "installed": True,
+                "restart_scheduled": restart_scheduled,
+                "source": target.source,
+            },
         )
+
+    async def _update_target(self) -> UpdateTarget:
+        posthog_id = self._posthog_id
+        if posthog_id is None:
+            from ..telemetry import _resolve_install_id
+
+            posthog_id = _resolve_install_id()
+        result = await self._registrar_client().plugin_version(APP_ID, posthog_id=posthog_id)
+        return UpdateTarget(version=result.current_version, source=result.source)
+
+    def _registrar_client(self) -> RegistrarCommandClient:
+        if self._registrar is not None:
+            return self._registrar
+        from ..registrar_config import build_registrar_client
+
+        return build_registrar_client()
+
+    def _update_blockers(self, target: UpdateTarget) -> list[str]:
+        blockers: list[str] = []
+        if not target.version:
+            blockers.append("registrar returned an empty current_version")
+        if not _is_install_script_source(target.source):
+            blockers.append("registrar source is not an http(s) install script URL")
+        return blockers
 
     # ─── reply ────────────────────────────────────────────────────────────
 
@@ -329,6 +434,11 @@ class CommandHandler:
         )
 
 
+def _is_install_script_source(source: str) -> bool:
+    parsed = urlparse(source)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
 def _gen_device_pair_code() -> str:
     """A 6-digit CSPRNG OTP (always exactly 6 digits)."""
     return f"{secrets.randbelow(900000) + 100000:06d}"
@@ -340,3 +450,69 @@ def _gen_pair_id() -> str:
 
 def _field_error(error: str) -> str:
     return str(error)[:255]
+
+
+async def run_install_script(source: str) -> None:
+    """Fetch and run the registrar-supplied install script non-interactively."""
+    await asyncio.to_thread(_run_install_script_sync, source)
+
+
+def _run_install_script_sync(source: str) -> None:
+    if not _is_install_script_source(source):
+        raise InstallScriptError("registrar source is not an http(s) install script URL")
+    script_path = ""
+    try:
+        with urllib.request.urlopen(source, timeout=30.0) as resp:  # noqa: S310
+            script = resp.read()
+        fd, script_path = tempfile.mkstemp(
+            prefix="chat4000-plugin-update-", suffix=".sh", dir="/tmp"
+        )
+        with os.fdopen(fd, "wb") as f:
+            f.write(script)
+        os.chmod(script_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        args = ["/bin/bash", script_path, "--no-wizard"]
+        from ..registrar_config import resolve_env
+
+        if resolve_env() == "stage":
+            args.append("--stage")
+        result = subprocess.run(  # noqa: S603  # trusted argv; script source is registrar policy
+            args,
+            capture_output=True,
+            text=True,
+            timeout=INSTALL_SCRIPT_TIMEOUT_S,
+            check=False,
+        )
+    except (urllib.error.URLError, OSError, TimeoutError, subprocess.TimeoutExpired) as exc:
+        raise InstallScriptError(
+            f"install script failed before completion: {type(exc).__name__}"
+        ) from exc
+    finally:
+        if script_path:
+            with contextlib.suppress(OSError):
+                os.unlink(script_path)
+    if result.returncode != 0:
+        raise InstallScriptError(f"install script exited {result.returncode}")
+
+
+def schedule_gateway_restart() -> None:
+    """Schedule a detached gateway restart after the command result can be sent."""
+    helper = (
+        "import shutil, subprocess, time\n"
+        f"time.sleep({RESTART_DELAY_S!r})\n"
+        "subprocess.run(['pkill', '-9', '-f', 'hermes gateway run'], check=False)\n"
+        "time.sleep(2.0)\n"
+        "running = subprocess.run(['pgrep', '-f', 'hermes gateway run'], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0\n"
+        "hermes = shutil.which('hermes')\n"
+        "if not running and hermes:\n"
+        "    log = open('/tmp/gateway.log', 'ab')\n"
+        "    subprocess.Popen([hermes, 'gateway', 'run'], stdout=log, stderr=subprocess.STDOUT, "
+        "start_new_session=True, close_fds=True)\n"
+    )
+    subprocess.Popen(  # noqa: S603  # trusted fixed argv; detached restart helper
+        [sys.executable, "-c", helper],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )

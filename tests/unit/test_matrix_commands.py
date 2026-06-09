@@ -6,7 +6,7 @@ import asyncio
 
 from chat4000_hermes_plugin.matrix import commands as matrix_commands
 from chat4000_hermes_plugin.matrix.commands import CommandHandler
-from chat4000_hermes_plugin.matrix.registrar_client import RegistrarError
+from chat4000_hermes_plugin.matrix.registrar_client import PluginVersion, RegistrarError
 
 
 class FakeRooms:
@@ -65,11 +65,24 @@ class FakeSession:
 
 
 class FakeRegistrar:
-    def __init__(self, statuses=None, register_error=None):
+    def __init__(
+        self,
+        version="2.2.0",
+        source="https://example.test/install.sh",
+        statuses=None,
+        register_error=None,
+    ):
+        self.version = version
+        self.source = source
+        self.calls: list = []
         self.register_calls: list = []
         self.status_calls: list = []
         self.statuses = list(statuses or [])
         self.register_error = register_error
+
+    async def plugin_version(self, app_id, *, posthog_id=None):
+        self.calls.append((app_id, posthog_id))
+        return PluginVersion(current_version=self.version, source=self.source)
 
     async def register(
         self,
@@ -138,20 +151,61 @@ async def test_session_delete_leaves_forgets_and_replies():
     assert content["room_id"] == "!old:hs"
 
 
-async def test_plugin_update_is_refused():
+async def test_plugin_update_runs_registrar_install_script_and_schedules_restart():
     s = FakeSession()
-    await CommandHandler(s).handle("!control:hs", "plugin.update", {"version": "9.9.9"})
+    reg = FakeRegistrar()
+    installed: list = []
+    restarted: list = []
+
+    async def install(source):
+        installed.append(source)
+
+    await CommandHandler(
+        s,
+        version="2.1.0",
+        registrar=reg,
+        posthog_id="ph_test",
+        installer_runner=install,
+        restart_scheduler=lambda: restarted.append(True),
+    ).handle("!control:hs", "plugin.update", {})
     _, content, _ = s.crypto.sent[-1]
-    assert content["command"] == "plugin.update" and content["ok"] is False
+    assert content["command"] == "plugin.update"
+    assert content["ok"] is True
+    assert content["from_version"] == "2.1.0"
+    assert content["to_version"] == "2.2.0"
+    assert content["installed"] is True
+    assert content["restart_scheduled"] is True
+    assert installed == ["https://example.test/install.sh"]
+    assert restarted == [True]
+    assert reg.calls == [("@chat4000/hermes-plugin", "ph_test")]
 
 
 async def test_update_check_is_readonly():
     s = FakeSession()
-    await CommandHandler(s, version="2.1.0").handle("!control:hs", "plugin.update_check", {})
+    reg = FakeRegistrar()
+    await CommandHandler(s, version="2.1.0", registrar=reg, posthog_id="ph_test").handle(
+        "!control:hs", "plugin.update_check", {}
+    )
     _, content, _ = s.crypto.sent[-1]
     assert content["ok"] is True
     assert content["current_version"] == "2.1.0"
+    assert content["latest_version"] == "2.2.0"
+    assert content["updatable"] is True
+    assert content["source"] == "https://example.test/install.sh"
+    assert content["blockers"] == []
+    assert reg.calls == [("@chat4000/hermes-plugin", "ph_test")]
+
+
+async def test_update_check_reports_invalid_install_source_as_blocker():
+    s = FakeSession()
+    reg = FakeRegistrar(source="not-a-url")
+    await CommandHandler(s, version="2.1.0", registrar=reg, posthog_id="ph_test").handle(
+        "!control:hs", "plugin.update_check", {}
+    )
+    _, content, _ = s.crypto.sent[-1]
+    assert content["ok"] is True
     assert content["updatable"] is False
+    assert content["blockers"] == ["registrar source is not an http(s) install script URL"]
 
 
 async def test_device_pair_start_registers_sender_bound_code_and_replies(monkeypatch):

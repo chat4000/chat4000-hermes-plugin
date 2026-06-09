@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import registrar_config
 from .matrix.creds_store import crypto_store_path, load_bot_creds
 from .matrix.registrar_client import RegistrarClient, RegistrarError
 from .matrix.users_store import add_known_user, load_known_users
@@ -39,73 +40,32 @@ from .telemetry import (
 
 APP_ID = "@chat4000/hermes-plugin"
 
-# Per-environment registrar. The registrar you pair against decides everything:
-# the stage registrar mints stage creds whose gateway_url points at the stage
-# gateway, so the running plugin follows automatically (it just uses the stored
-# creds). Select with `chat4000 pair --stage` or CHAT4000_ENV=stage.
-REGISTRAR_URLS = {
-    "production": "https://registrar.chat4000.com",
-    "stage": "https://registrar.stgcht4.duckdns.org",
-}
+REGISTRAR_URLS = registrar_config.REGISTRAR_URLS
+DEFAULT_SERVICE_TOKEN = registrar_config.DEFAULT_SERVICE_TOKEN
 
 
 def _env_file_path() -> Path:
-    """Where the chosen environment is persisted so it survives a fresh shell.
-
-    `--stage` (or CHAT4000_ENV) only lives in the process that set it; a later
-    `chat4000 pair` in a new shell would otherwise fall back to production. We
-    record the selection here at pair time and read it as a fallback."""
-    from .key_store import resolve_chat4000_plugin_dir
-
-    return resolve_chat4000_plugin_dir() / "env"
+    return registrar_config.env_file_path()
 
 
 def _load_persisted_env() -> str:
-    try:
-        value = _env_file_path().read_text(encoding="utf-8").strip().lower()
-        return value if value in REGISTRAR_URLS else ""
-    except OSError:
-        return ""
+    return registrar_config.load_persisted_env()
 
 
 def _persist_env(env: str) -> None:
-    """Record the environment selection durably (best-effort, never raises)."""
-    if env not in REGISTRAR_URLS:
-        return
-    try:
-        path = _env_file_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(env + "\n", encoding="utf-8")
-    except OSError:
-        pass
+    registrar_config.persist_env(env)
 
 
 def _resolve_env() -> str:
-    # An explicit CHAT4000_ENV wins; else the persisted selection from the last
-    # pair; else production.
-    env = os.environ.get("CHAT4000_ENV", "").strip().lower()
-    if env in REGISTRAR_URLS:
-        return env
-    return _load_persisted_env() or "production"
+    return registrar_config.resolve_env()
 
 
 def _resolve_registrar_url() -> str:
-    # An explicit URL override wins (self-hosted / custom); else by environment.
-    explicit = os.environ.get("CHAT4000_REGISTRAR_URL", "").strip()
-    return explicit or REGISTRAR_URLS[_resolve_env()]
-
-
-# Static shared service token. It gates only pairing-code registration + status
-# polling (never content) — basic-auth-grade by design (pushback X2): it ships in
-# the client, so treat it as public. Baked in so installs need no token; override
-# with CHAT4000_SERVICE_TOKEN to rotate. Must match the registrar's
-# REGISTRAR_SERVICE_TOKEN.
-DEFAULT_SERVICE_TOKEN = "chat4000_svc_72ee3b80a16f826a173c65450cadd107d5f6912d4d96135a"  # noqa: S105  # public basic-auth-grade token, ships in client by design
+    return registrar_config.resolve_registrar_url()
 
 
 def _registrar() -> RegistrarClient:
-    token = os.environ.get("CHAT4000_SERVICE_TOKEN", "").strip() or DEFAULT_SERVICE_TOKEN
-    return RegistrarClient(_resolve_registrar_url(), token)
+    return registrar_config.build_registrar_client()
 
 
 def _gen_code() -> str:
@@ -312,7 +272,9 @@ async def _run_pair(account: str) -> None:
 
     # Version gate (C.5) — refuse on force_upgrade, report to the operator.
     try:
-        verdict = await reg.version(APP_ID, version, "production")
+        from .telemetry import _resolve_install_id
+
+        verdict = await reg.version(APP_ID, version, env, posthog_id=_resolve_install_id())
         if verdict.action == "force_upgrade":
             analytics.track(
                 "version_force_upgrade",
@@ -334,7 +296,7 @@ async def _run_pair(account: str) -> None:
     # already have done this at startup in the gateway-first flow).
     from .onboarding import ensure_onboarded
 
-    creds = await ensure_onboarded(account)
+    creds = await ensure_onboarded(account, registrar=reg)
     if creds is None:
         click.echo("Could not onboard the plugin identity (registrar unreachable?).", err=True)
         return
@@ -371,7 +333,7 @@ async def _run_prepare(account: str) -> None:
 
     from .onboarding import ensure_onboarded
 
-    creds = await ensure_onboarded(account)
+    creds = await ensure_onboarded(account, registrar=_registrar())
     if creds is None:
         click.echo("Onboard failed — is the registrar reachable?", err=True)
         sys.exit(1)

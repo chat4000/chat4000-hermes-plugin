@@ -83,17 +83,6 @@ removing if the history matters.
 
 ---
 
-## Deferred on backend (not ours to build yet)
-
-### T7 — `plugin.update` (owner-gated remote update)
-- **Where:** `matrix/commands.py::_update` (currently refuses with `ok:false`).
-- **Why:** Owner-gated remote code update over chat. Blocked until the registrar
-  defines how an owner identity is established and proven (pushback X4). Refusing
-  cleanly is correct until then — do NOT guess an owner model.
-- **Status:** DEFERRED (blocked on backend X4).
-
----
-
 ## External (other repos — tracked, not fixed here)
 
 ### T8 — iOS client must dedupe timeline events by `event_id`

@@ -3,14 +3,15 @@
 One agent reply = one **turn**, anchored by a single `m.room.message` event that
 edits itself via `m.replace` as text streams; the final edit carries the full
 answer and is the ONLY event with `chat4000.push: true`. Tool calls are separate
-`chat4000.tool` events linked to the anchor via `chat4000.turn_id`. Live activity
-is a `chat4000.status` event (E2EE timeline event) carrying a multi-value state and
-referencing the QUESTION event — native `m.typing` is not used (protocol e3d9358).
+START-only `chat4000.tool` events with no turn link and no completion update. Live
+activity is a `chat4000.status` event (E2EE timeline event) carrying a multi-value
+state and referencing the QUESTION event — native `m.typing` is not used
+(protocol e3d9358).
 
 Push discipline (the rule that must not be gotten wrong): EVERY event of the turn
 carries `chat4000.push: false` — the anchor, every streaming edit, every tool
-start/edit — EXCEPT the single final answer edit (`true`). The first message of
-the turn MUST be explicitly `false` (absent ⇒ push-eligible ⇒ would wake on the
+event — EXCEPT the single final answer edit (`true`). The first message of the
+turn MUST be explicitly `false` (absent ⇒ push-eligible ⇒ would wake on the
 opening partial).
 
 Encrypted events go through the crypto driver; native `m.typing` is an ephemeral
