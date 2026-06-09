@@ -16,9 +16,15 @@ and prove an owner identity, we refuse it with a clear error rather than guess.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
-from typing import TYPE_CHECKING, Any
+import secrets
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
 
+from .registrar_client import RegistrarError
 from .rooms import DEFAULT_SESSION_ROOM_NAME
 
 if TYPE_CHECKING:
@@ -27,6 +33,31 @@ if TYPE_CHECKING:
     from .session import MatrixSession
 
 logger = logging.getLogger(__name__)
+DEVICE_PAIR_TTL_SECONDS = 120
+PAIR_STATUS_POLL_INTERVAL_S = 1.5
+
+
+class DevicePairRegistrarClient(Protocol):
+    async def register(
+        self,
+        code: str,
+        *,
+        kind: str = "user",
+        plugin_id: str | None = None,
+        user_id: str | None = None,
+        ttl_seconds: int | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def status(self, code: str) -> dict[str, Any]: ...
+
+
+@dataclass
+class PendingPairing:
+    pair_id: str
+    code: str
+    sender: str
+    deadline: float
+    task: asyncio.Task[None]
 
 
 class CommandHandler:
@@ -36,10 +67,13 @@ class CommandHandler:
         *,
         owner_user_id: str | None = None,
         version: str = "0.0.0",
+        registrar: DevicePairRegistrarClient | None = None,
     ) -> None:
         self._s = session
         self._owner = owner_user_id
         self._version = version
+        self._registrar = registrar
+        self._pairings: dict[str, PendingPairing] = {}
 
     @property
     def _rooms(self) -> RoomManager:
@@ -53,7 +87,9 @@ class CommandHandler:
             raise RuntimeError("command handler used before the session built its crypto driver")
         return self._s.crypto
 
-    async def handle(self, room_id: str, command: str, content: dict[str, Any]) -> None:
+    async def handle(
+        self, room_id: str, command: str, content: dict[str, Any], *, sender: str = ""
+    ) -> None:
         try:
             if command == "session.new":
                 await self._session_new(content)
@@ -67,6 +103,10 @@ class CommandHandler:
                 await self._update_check()
             elif command == "plugin.update":
                 await self._update(content)
+            elif command == "device.pair_start":
+                await self._device_pair_start(sender)
+            elif command == "device.pair_cancel":
+                await self._device_pair_cancel(content)
             else:
                 await self._reply(command, {"ok": False, "error": f"unknown command {command!r}"})
         except Exception as exc:  # noqa: BLE001
@@ -128,6 +168,121 @@ class CommandHandler:
         await self._rooms.delete_session(room_id)
         await self._reply("session.delete", {"ok": True, "room_id": room_id})
 
+    async def _device_pair_start(self, sender: str) -> None:
+        pair_id = _gen_pair_id()
+        if not sender:
+            await self._fail_pair_start(pair_id, "event sender missing")
+            return
+        plugin_id = getattr(self._s, "plugin_id", None)
+        if not plugin_id:
+            await self._fail_pair_start(pair_id, "plugin_id missing")
+            return
+
+        code = _gen_device_pair_code()
+        registrar = self._registrar_client()
+        try:
+            await registrar.register(
+                code,
+                kind="user",
+                plugin_id=plugin_id,
+                user_id=sender,
+                ttl_seconds=DEVICE_PAIR_TTL_SECONDS,
+            )
+        except RegistrarError as exc:
+            await self._fail_pair_start(pair_id, str(exc))
+            return
+
+        deadline = time.monotonic() + DEVICE_PAIR_TTL_SECONDS
+        await self._reply("device.pair_start", {"pair_id": pair_id, "code": code})
+        task = asyncio.create_task(self._poll_pairing(pair_id, code, deadline))
+        self._pairings[pair_id] = PendingPairing(
+            pair_id=pair_id,
+            code=code,
+            sender=sender,
+            deadline=deadline,
+            task=task,
+        )
+
+    async def _fail_pair_start(self, pair_id: str, error: str) -> None:
+        fields = {"pair_id": pair_id, "error": _field_error(error)}
+        await self._reply("device.pair_start", fields)
+        await self._pair_status(pair_id, "error", error=error)
+
+    async def _device_pair_cancel(self, content: dict[str, Any]) -> None:
+        pair_id = content.get("pair_id")
+        if not isinstance(pair_id, str) or not pair_id or len(pair_id) > 64:
+            await self._reply(
+                "device.pair_cancel",
+                {"pair_id": str(pair_id or "")[:64], "error": "valid pair_id required"},
+            )
+            return
+        attempt = self._pairings.pop(pair_id, None)
+        if attempt is None:
+            await self._reply(
+                "device.pair_cancel", {"pair_id": pair_id, "error": "unknown pair_id"}
+            )
+            return
+        attempt.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await attempt.task
+        await self._reply("device.pair_cancel", {"pair_id": pair_id})
+        await self._pair_status(pair_id, "cancelled")
+
+    async def _poll_pairing(self, pair_id: str, code: str, deadline: float) -> None:
+        registrar = self._registrar_client()
+        try:
+            while time.monotonic() < deadline:
+                status = await registrar.status(code)
+                state = status.get("status")
+                if state == "completed":
+                    await self._pair_status(pair_id, "completed")
+                    return
+                if state == "expired":
+                    await self._pair_status(pair_id, "expired")
+                    return
+                if state not in ("pending", None):
+                    await self._pair_status(pair_id, "error", error=f"unknown status {state!r}")
+                    return
+                sleep_for = min(PAIR_STATUS_POLL_INTERVAL_S, max(0.0, deadline - time.monotonic()))
+                if sleep_for <= 0:
+                    break
+                await asyncio.sleep(sleep_for)
+            await self._pair_status(pair_id, "expired")
+        except asyncio.CancelledError:
+            raise
+        except RegistrarError as exc:
+            await self._pair_status(pair_id, "error", error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            from ..error_log import dump_chat4000_trace
+
+            dump_chat4000_trace("matrix.device_pair_status", exc, {"pair_id": pair_id})
+            await self._pair_status(pair_id, "error", error=str(exc))
+        finally:
+            self._pairings.pop(pair_id, None)
+
+    async def _pair_status(self, pair_id: str, state: str, *, error: str | None = None) -> None:
+        control = self._rooms.control_room_id
+        if control is None:
+            logger.warning("no control room; cannot send pair status %s", state)
+            return
+        content: dict[str, Any] = {
+            "msgtype": "chat4000.pair_status",
+            "pair_id": pair_id,
+            "state": state,
+        }
+        if error is not None:
+            content["error"] = _field_error(error)
+        await self._crypto.send_room_event(
+            control, "m.room.message", content, self._s.recipients(control), push=False
+        )
+
+    def _registrar_client(self) -> DevicePairRegistrarClient:
+        if self._registrar is not None:
+            return self._registrar
+        from ..cli import _registrar
+
+        return _registrar()
+
     async def _update_check(self) -> None:
         # Read-only. We don't (yet) resolve a latest version or restart method —
         # report current + not-updatable until plugin.update is designed (X4).
@@ -172,3 +327,16 @@ class CommandHandler:
         await self._crypto.send_room_event(
             control, "m.room.message", content, self._s.recipients(control), push=False
         )
+
+
+def _gen_device_pair_code() -> str:
+    """A 6-digit CSPRNG OTP (always exactly 6 digits)."""
+    return f"{secrets.randbelow(900000) + 100000:06d}"
+
+
+def _gen_pair_id() -> str:
+    return f"p_{secrets.token_hex(6)}"
+
+
+def _field_error(error: str) -> str:
+    return str(error)[:255]

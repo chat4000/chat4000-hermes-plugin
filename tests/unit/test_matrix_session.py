@@ -36,8 +36,8 @@ def _session(clear, captured):
     async def on_msg(r, s, c, eid=""):
         captured.append(("msg", r, s, c))
 
-    async def on_cmd(r, cmd, c):
-        captured.append(("cmd", r, cmd, c))
+    async def on_cmd(r, cmd, c, sender):
+        captured.append(("cmd", r, cmd, c, sender))
 
     s = MatrixSession(creds, on_user_message=on_msg, on_command=on_cmd)
     s.gateway = FakeGateway()
@@ -56,7 +56,7 @@ async def test_command_in_control_room_is_honored():
         "content": {"msgtype": "chat4000.command", "command": "session.new", "title": "x"},
     }
     await _session(clear, cap)._handle_encrypted("!control:hs", ENC)
-    assert cap == [("cmd", "!control:hs", "session.new", clear["content"])]
+    assert cap == [("cmd", "!control:hs", "session.new", clear["content"], "@u:hs")]
 
 
 async def test_command_outside_control_room_is_ignored():

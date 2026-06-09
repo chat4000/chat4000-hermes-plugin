@@ -33,13 +33,15 @@ logger = logging.getLogger(__name__)
 
 # (room_id, sender, content, event_id) — event_id is the QUESTION event (for status)
 UserMessageCb = Callable[[str, str, dict[str, Any], str], Awaitable[None]]
-CommandCb = Callable[[str, str, dict[str, Any]], Awaitable[None]]  # (room_id, command, content)
+CommandCb = Callable[
+    [str, str, dict[str, Any], str], Awaitable[None]
+]  # (room_id, command, content, sender)
 
 APP_ID = "@chat4000/hermes-plugin"
 
 
 async def _noop_msg(room_id: str, sender: str, content: dict[str, Any], event_id: str) -> None: ...
-async def _noop_cmd(room_id: str, command: str, content: dict[str, Any]) -> None: ...
+async def _noop_cmd(room_id: str, command: str, content: dict[str, Any], sender: str) -> None: ...
 
 
 class MatrixSession:
@@ -127,6 +129,10 @@ class MatrixSession:
     @property
     def members(self) -> list[str]:
         return list(self._members)
+
+    @property
+    def plugin_id(self) -> str | None:
+        return self._creds.plugin_id
 
     async def invite_user(self, user_id: str) -> None:
         """Invite a paired user into the space + control room (their entry point;
@@ -261,7 +267,7 @@ class MatrixSession:
                 logger.debug(
                     "routing command=%s room=%s (control)", content.get("command"), room_id
                 )
-                await self._on_command(room_id, content.get("command", ""), content)
+                await self._on_command(room_id, content.get("command", ""), content, sender or "")
             else:
                 logger.info("ignoring chat4000.command outside control room (%s)", room_id)
             return

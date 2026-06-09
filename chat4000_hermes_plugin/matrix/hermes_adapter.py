@@ -279,9 +279,11 @@ class Chat4000MatrixAdapter:
 
     # ─── inbound callbacks (from MatrixSession) ───────────────────────────
 
-    async def _on_command(self, room_id: str, command: str, content: dict[str, Any]) -> None:
+    async def _on_command(
+        self, room_id: str, command: str, content: dict[str, Any], sender: str
+    ) -> None:
         if self._commands is not None:
-            await self._commands.handle(room_id, command, content)
+            await self._commands.handle(room_id, command, content, sender=sender)
 
     async def _on_user_message(
         self, room_id: str, sender: str, content: dict[str, Any], event_id: str = ""
