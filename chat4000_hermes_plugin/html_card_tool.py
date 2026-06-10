@@ -1,4 +1,4 @@
-"""Chat4000-only Hermes tool for typed HTML-card final answers.
+"""final_card tool (native rich final answer surface for chat4000 sessions).
 
 The tool description below IS the prompt that makes the model pick this tool
 and produce on-brand cards. It is assembled from named sections so each
@@ -15,25 +15,25 @@ import json
 import os
 from typing import Any
 
-HTML_CARD_TOOL_NAME = "chat4000_send_html_card"
+HTML_CARD_TOOL_NAME = "final_card"
 HTML_CARD_TOOLSET = "chat4000"
 
 _CORE_RULE = (
-    "Send a complete HTML card as the final answer in the current Chat4000 turn. "
-    "The card REPLACES the text answer: call this tool once per turn, with finished "
-    "HTML (never partial or streamed), and do not also send a text final answer."
+    "Call final_card to deliver a complete, self-contained HTML card as the final "
+    "answer for the current turn in a chat4000 session. This is the native rich "
+    "final surface for chat4000. The card replaces the text answer: call this tool "
+    "once per turn, with finished HTML (never partial or streamed), and do not also "
+    "send a text final answer."
 )
 
 _WHEN_TO_USE = """\
-WHEN TO USE — prefer a card over plain text whenever the final answer is structured,
-glanceable data rather than prose. Typical cards: weather (current + hourly strip);
-knowledge panel / entity facts (a person, place, or thing); timer / countdown /
-reminder confirmation; sports scores & fixtures; stock or crypto snapshot with a
-sparkline; local business shortlist ("coffee near me"); flight status / boarding
-info; package-tracking timeline; calendar / day agenda; to-do list or checklist;
-nutrition facts; time zones / world clock.
-DO NOT use for conversational replies, explanations or essays, code the user will
-copy, or anything that should stream or be edited later — answer those as text."""
+Use final_card when the final answer is structured, glanceable data rather than 
+plain prose — weather, knowledge panels, status, lists, agendas, etc.
+
+All answers shouldn't be like this. Use it in good taste, to delight the user 
+surprisingly. Do it unless the user has explicitly said they prefer plain text 
+or don't like cards. For conversational replies, explanations or essays, or code 
+the user will copy, answer as normal text instead."""
 
 _RENDER_CONTEXT = """\
 RENDER CONTEXT — the card renders as a bubble in the chat4000 iOS/macOS chat
@@ -209,7 +209,7 @@ def register_html_card_tool(ctx: Any) -> None:  # noqa: ANN401  # Hermes plugin 
         schema=HTML_CARD_TOOL_SCHEMA,
         handler=send_html_card_tool,
         is_async=True,
-        description="Send a Chat4000 typed HTML-card final answer.",
+        description="Deliver a beautiful HTML card as the native final answer (chat4000 sessions only).",
     )
 
 

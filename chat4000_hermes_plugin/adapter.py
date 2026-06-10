@@ -106,7 +106,9 @@ def register(ctx: Any) -> None:  # noqa: ANN401  # Hermes host plugin context (u
         platform_hint=(
             "You are chatting via chat4000 (encrypted iOS/macOS/CLI client over "
             "Matrix). Markdown is supported; replies stream as message edits and "
-            "tool calls render as expandable bubbles — keep tool args readable."
+            "tool calls render as expandable bubbles. For structured, glanceable, "
+            "or delightful final answers use the final_card tool — the native rich "
+            "card surface in the chat4000 timeline. Keep tool args readable."
         ),
         emoji="🔐",
     )

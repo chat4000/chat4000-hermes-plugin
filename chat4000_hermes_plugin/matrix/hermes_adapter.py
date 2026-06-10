@@ -573,7 +573,7 @@ class Chat4000MatrixAdapter:
     async def external_html_card(self, html: str, *, session_id: str = "", room: str = "") -> str:
         """Send the Chat4000-specific HTML-card final-answer event.
 
-        Called only by the internal `chat4000_send_html_card` plugin tool after it
+        Called only by the internal `final_card` plugin tool after it
         has verified the Hermes session context is a Chat4000 gateway turn. The
         card event itself is the visible result, so this method marks the room's
         current turn as card-finalized; later text sends/edits and the turn-end
