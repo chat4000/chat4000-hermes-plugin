@@ -32,9 +32,12 @@ DEFAULT_SESSION_ROOM_NAME = "New chat"
 
 
 def derive_first_message_title(text: str) -> str | None:
-    """Protocol E deterministic room title from the first user message."""
+    """Protocol E deterministic room title from the first user message.
+
+    Command-like messages are never a title: if the normalized text starts with
+    "/" we return None (a room once got permanently titled "/approve")."""
     normalized = " ".join(text.split())
-    if not normalized:
+    if not normalized or normalized.startswith("/"):
         return None
     dot = normalized.find(".")
     title = normalized[:dot] if 0 <= dot < 50 else normalized[:50]

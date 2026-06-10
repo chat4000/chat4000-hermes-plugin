@@ -113,6 +113,9 @@ module = [
     "gateway.*",
     "hermes_cli.*",
     "hermes_agent.*",
+    # Host-process state DB (state.db reader for the title poll) — same
+    # category as gateway.*: only importable inside the Hermes host.
+    "hermes_state",
     "chat4000_pyvodozemac.*",
     "posthog.*",
     "qrcode.*",

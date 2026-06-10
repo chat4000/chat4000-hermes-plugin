@@ -49,22 +49,24 @@ removing if the history matters.
 ## Sessions
 
 ### T4 — Session naming (auto-title → `m.room.name`)
-- **Where:** new wiring in `matrix/` + `matrix/commands.py::_session_rename`.
-- **Why:** Auto-created session rooms start unnamed ("session"). Hermes already
-  LLM-auto-titles a session from the first exchange via a `title_callback` (the
-  same hook Telegram uses to rename its forum topic). Mirror it: hook that
-  callback → set `m.room.name`; map our `session.rename` command →
-  `hermes_state.set_session_title`; add a per-room "disable auto-rename" config.
-  Don't invent a naming scheme — reuse the agent's. (Research done; see the
-  session-handoff notes.)
-- **Status:** OPEN (future feature).
+- **Where:** `plugin_hooks.py::on_post_llm_call` + `_poll_host_title`, applied
+  via `matrix/hermes_adapter.py::_apply_host_session_title` →
+  `matrix/rooms.py::maybe_apply_host_title` (refuses to clobber manual renames).
+- **How (chosen):** the host never delivers the auto-title to platform adapters
+  (Telegram-only callback), so the plugin hooks `post_llm_call` (first exchanges
+  only — mirrors the host's <= 2-user-messages heuristic) and polls
+  `hermes_state.SessionDB(read_only=True).get_session_title()` every 2s, 60s
+  budget, on the adapter loop. One poller per session; titled rooms are never
+  re-polled. An upstream `on_session_title` hook PR is pending — when it lands,
+  replace the poll with the push.
+- **Status:** DONE (poll-based pickup). T5 is unblocked.
 
 ### T5 — Name the auto-created initial session room
 - **Where:** `matrix/hermes_adapter.py::_ensure_initial_session`.
 - **Why:** The pairing auto-session (`4be87c2`) creates the room with the default
-  "session" title. Once T4 lands, the auto-titler will name it from the first
-  exchange; until then it stays generic. Tracked so it isn't forgotten.
-- **Status:** OPEN, blocked on T4.
+  "session" title. T4 landed, so the auto-titler now names it from the first
+  exchange; verify the initial room actually picks the title up.
+- **Status:** OPEN, unblocked (T4 done).
 
 ---
 
