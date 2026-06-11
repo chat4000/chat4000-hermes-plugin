@@ -62,11 +62,16 @@ def register(ctx: Any) -> None:  # noqa: ANN401  # Hermes host plugin context (u
     """Plugin entry point — Hermes' loader calls this once on discovery."""
     from . import analytics
     from .html_card_tool import register_html_card_tool
+    from .machine_ids import detect_container_rebuilt
     from .plugin_hooks import register_plugin_hooks
     from .telemetry import initialize_chat4000_telemetry
 
+    # IDN9 MUST run before telemetry init below mints the env-id file (its
+    # absence is the rebuild signal).
+    container_rebuilt = detect_container_rebuilt()
     initialize_chat4000_telemetry()
     analytics.initialize_chat4000_analytics()
+    analytics.emit_plugin_boot_analytics(container_rebuilt=container_rebuilt)  # PL1 + PL5
 
     # Hide the transient Telegram "polling conflict" warning a gateway restart
     # triggers (self-heals in seconds) — better UX than making users wait it out.

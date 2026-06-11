@@ -54,7 +54,7 @@ PAIR_STATUS_POLL_INTERVAL_S = 1.5
 
 class RegistrarCommandClient(Protocol):
     async def plugin_version(
-        self, app_id: str, *, posthog_id: str | None = None
+        self, app_id: str, *, client_id: str | None = None
     ) -> PluginVersion: ...
 
     async def register(
@@ -100,14 +100,14 @@ class CommandHandler:
         *,
         version: str = "0.0.0",
         registrar: RegistrarCommandClient | None = None,
-        posthog_id: str | None = None,
+        client_id: str | None = None,
         installer_runner: InstallerRunner | None = None,
         restart_scheduler: RestartScheduler | None = None,
     ) -> None:
         self._s = session
         self._version = version
         self._registrar = registrar
-        self._posthog_id = posthog_id
+        self._client_id = client_id
         self._installer_runner = installer_runner or run_install_script
         self._restart_scheduler = restart_scheduler or schedule_gateway_restart
         self._pairings: dict[str, PendingPairing] = {}
@@ -272,6 +272,7 @@ class CommandHandler:
                 status = await registrar.status(code)
                 state = status.get("status")
                 if state == "completed":
+                    self._emit_pairing_completed(status)
                     await self._pair_status(pair_id, "completed")
                     return
                 if state == "expired":
@@ -296,6 +297,21 @@ class CommandHandler:
             await self._pair_status(pair_id, "error", error=str(exc))
         finally:
             self._pairings.pop(pair_id, None)
+
+    def _emit_pairing_completed(self, status: dict[str, Any]) -> None:
+        """PL4/FLW3-4: the /pair/status completed payload may carry the
+        redeeming phone's client_id — emit the machine↔phone join event and
+        register the super property (latest pairing wins). The id is absent on
+        old registrars / telemetry-off phones; the event still counts the
+        completion."""
+        from .. import analytics
+
+        props: dict[str, Any] = {"flow": "device_pair"}
+        paired_client_id = str(status.get("client_id") or "").strip()
+        if paired_client_id:
+            analytics.register_paired_client_id(paired_client_id)
+            props["paired_client_id"] = paired_client_id
+        analytics.track("pairing_completed", props)
 
     async def _pair_status(self, pair_id: str, state: str, *, error: str | None = None) -> None:
         control = self._rooms.control_room_id
@@ -370,6 +386,15 @@ class CommandHandler:
             )
             return
 
+        from .. import analytics
+
+        # PL2: the self-update is starting — pairs with the registrar's RG2
+        # row and the next plugin_started on the new version.
+        analytics.track(
+            "plugin_upgrading",
+            {"from_version": self._version, "to_version": target.version, "trigger": "command"},
+        )
+        analytics.flush()  # the restart below would otherwise drop the event
         await self._installer_runner(target.source)
         restart_scheduled = False
         if restart_requested:
@@ -388,12 +413,13 @@ class CommandHandler:
         )
 
     async def _update_target(self) -> UpdateTarget:
-        posthog_id = self._posthog_id
-        if posthog_id is None:
-            from ..telemetry import _resolve_install_id
+        client_id = self._client_id
+        if client_id is None:
+            from .. import analytics
 
-            posthog_id = _resolve_install_id()
-        result = await self._registrar_client().plugin_version(APP_ID, posthog_id=posthog_id)
+            # PL3: X-Client-Id = agent_install_id; None when telemetry is off.
+            client_id = analytics.machine_client_id()
+        result = await self._registrar_client().plugin_version(APP_ID, client_id=client_id)
         return UpdateTarget(version=result.current_version, source=result.source)
 
     def _registrar_client(self) -> RegistrarCommandClient:

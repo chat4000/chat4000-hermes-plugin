@@ -209,7 +209,10 @@ def register_html_card_tool(ctx: Any) -> None:  # noqa: ANN401  # Hermes plugin 
         schema=HTML_CARD_TOOL_SCHEMA,
         handler=send_html_card_tool,
         is_async=True,
-        description="Deliver a beautiful HTML card as the native final answer (chat4000 sessions only).",
+        description=(
+            "Deliver a beautiful HTML card as the native final answer "
+            "(chat4000 sessions only)."
+        ),
     )
 
 

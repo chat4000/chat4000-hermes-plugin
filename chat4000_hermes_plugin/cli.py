@@ -272,9 +272,7 @@ async def _run_pair(account: str) -> None:
 
     # Version gate (C.5) — refuse on force_upgrade, report to the operator.
     try:
-        from .telemetry import _resolve_install_id
-
-        verdict = await reg.version(APP_ID, version, env, posthog_id=_resolve_install_id())
+        verdict = await reg.version(APP_ID, version, env, client_id=analytics.machine_client_id())
         if verdict.action == "force_upgrade":
             analytics.track(
                 "version_force_upgrade",
@@ -311,15 +309,24 @@ async def _run_pair(account: str) -> None:
     click.echo("Enter this code in the chat4000 app. Waiting for the device…")
     click.echo("(Ctrl-C to stop.)")
 
-    user_id = await reg.poll_until_complete(code)
-    if user_id is None:
+    status = await reg.poll_until_complete(code)
+    user_id = status.get("user_id") if status else None
+    if not user_id:
         analytics.track("pairing_expired", {"env": env})
         analytics.flush()
         click.echo("Pairing code expired without a device redeeming it. Try again.")
         return
 
     add_known_user(user_id, account)
-    analytics.track("pairing_completed", {"env": env, "first_run": first_run})
+    # FLW3/FLW4: the registrar hands us the redeeming phone's client_id —
+    # emit the machine↔phone join event and register the super property
+    # (latest pairing wins). Absent on old registrars / telemetry-off phones.
+    props: dict[str, Any] = {"env": env, "first_run": first_run}
+    paired_client_id = str(status.get("client_id") or "").strip() if status else ""
+    if paired_client_id:
+        analytics.register_paired_client_id(paired_client_id)
+        props["paired_client_id"] = paired_client_id
+    analytics.track("pairing_completed", props)
     analytics.flush()
     click.echo("")
     click.echo(f"✓ Paired {user_id}.")

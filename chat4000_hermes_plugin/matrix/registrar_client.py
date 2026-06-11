@@ -115,22 +115,18 @@ class RegistrarClient:
         client_version: str,
         release_channel: str,
         platform: str = "linux",
-        posthog_id: str | None = None,
+        client_id: str | None = None,
     ) -> VersionVerdict:
-        """C.5.1 — version policy check. Public."""
+        """C.5.1 — version policy check. Public. `client_id` (the machine's
+        agent_install_id, PL3) rides ONLY as the X-Client-Id header — the old
+        posthog_id body field is gone (never send both)."""
         body = {
             "app_id": app_id,
             "client_version": client_version,
             "release_channel": release_channel,
             "platform": platform,
         }
-        if posthog_id:
-            body["posthog_id"] = posthog_id[:64]
-        r = await self._post(
-            "/version",
-            body,
-            auth=False,
-        )
+        r = await self._post("/version", body, auth=False, client_id=client_id)
         return VersionVerdict(
             action=r.get("action", "ok"),
             recommended=r.get("recommended"),
@@ -138,12 +134,10 @@ class RegistrarClient:
             message=r.get("message"),
         )
 
-    async def plugin_version(self, app_id: str, *, posthog_id: str | None = None) -> PluginVersion:
-        """C.5.2 — ask which exact plugin build and install source to run."""
-        body = {"app_id": app_id}
-        if posthog_id:
-            body["posthog_id"] = posthog_id[:64]
-        r = await self._post("/plugin-version", body, auth=True)
+    async def plugin_version(self, app_id: str, *, client_id: str | None = None) -> PluginVersion:
+        """C.5.2 — ask which exact plugin build and install source to run.
+        `client_id` as the X-Client-Id header only (PL3); no posthog_id body."""
+        r = await self._post("/plugin-version", {"app_id": app_id}, auth=True, client_id=client_id)
         return PluginVersion(current_version=str(r["current_version"]), source=str(r["source"]))
 
     # ─── high-level flows ─────────────────────────────────────────────────
@@ -156,15 +150,17 @@ class RegistrarClient:
 
     async def poll_until_complete(
         self, code: str, *, interval: float = 1.5, deadline_s: float = 300.0
-    ) -> str | None:
-        """Poll `/pair/status` until `completed` (→ returns the user MXID),
-        `expired` (→ None), or the deadline. Respects the ≥1 s poll-rate rule."""
+    ) -> dict[str, Any] | None:
+        """Poll `/pair/status` until `completed` (→ returns the full status
+        payload: `user_id`, and `client_id` when the redeeming device sent one
+        — FLW2), `expired` (→ None), or the deadline. Respects the ≥1 s
+        poll-rate rule."""
         waited = 0.0
         while waited < deadline_s:
             s = await self.status(code)
             st = s.get("status")
             if st == "completed":
-                return s.get("user_id")
+                return s
             if st == "expired":
                 return None
             await asyncio.sleep(interval)
@@ -173,18 +169,29 @@ class RegistrarClient:
 
     # ─── transport ────────────────────────────────────────────────────────
 
-    async def _post(self, path: str, body: dict[str, Any], *, auth: bool) -> dict[str, Any]:
-        return await asyncio.to_thread(self._request, "POST", path, body, auth)
+    async def _post(
+        self, path: str, body: dict[str, Any], *, auth: bool, client_id: str | None = None
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self._request, "POST", path, body, auth, client_id)
 
     async def _get(self, path: str, *, auth: bool) -> dict[str, Any]:
-        return await asyncio.to_thread(self._request, "GET", path, None, auth)
+        return await asyncio.to_thread(self._request, "GET", path, None, auth, None)
 
     def _request(
-        self, method: str, path: str, body: dict[str, Any] | None, auth: bool
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None,
+        auth: bool,
+        client_id: str | None = None,
     ) -> dict[str, Any]:
         url = self._base + path
         data = json.dumps(body).encode("utf-8") if body is not None else None
         headers = {"Content-Type": "application/json"}
+        if client_id:
+            # PL3: the machine analytics id (agent_install_id). Callers pass
+            # None when telemetry is disabled — the id then never rides.
+            headers["X-Client-Id"] = client_id[:64]
         if auth:
             if not self._service_token:
                 raise RegistrarError(401, "M_MISSING_TOKEN", "no service token configured")

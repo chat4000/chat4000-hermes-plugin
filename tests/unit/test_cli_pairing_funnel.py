@@ -11,7 +11,6 @@ import contextlib
 
 import chat4000_hermes_plugin.analytics as analytics_mod
 import chat4000_hermes_plugin.cli as cli
-import chat4000_hermes_plugin.telemetry as telemetry_mod
 from chat4000_hermes_plugin.matrix.registrar_client import (
     RedeemResult,
     RegistrarError,
@@ -34,7 +33,8 @@ class _OkReg:
         return {"ok": True}
 
     async def poll_until_complete(self, code, **k):
-        return "@u:hs"
+        # FLW2: completed /pair/status payload, with the phone's client_id.
+        return {"status": "completed", "user_id": "@u:hs", "client_id": "phone-cid-1"}
 
 
 class _ExpiredReg(_OkReg):
@@ -51,29 +51,41 @@ class _Down502Reg:
 
 
 def _capture(monkeypatch):
-    events: list[str] = []
-    monkeypatch.setattr(analytics_mod, "track", lambda e, p=None: events.append(e))
+    events: list[tuple[str, dict | None]] = []
+    monkeypatch.setattr(analytics_mod, "track", lambda e, p=None: events.append((e, p)))
     monkeypatch.setattr(analytics_mod, "flush", lambda *a, **k: None)
     return events
 
 
+def _names(events):
+    return [e for e, _ in events]
+
+
 async def test_full_funnel_on_success(monkeypatch):
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
-    monkeypatch.setattr(telemetry_mod, "_resolve_install_id", lambda: "test-install-id")
     reg = _OkReg()
     monkeypatch.setattr(cli, "_registrar", lambda: reg)
+    registered: list[str] = []
+    monkeypatch.setattr(analytics_mod, "register_paired_client_id", registered.append)
     events = _capture(monkeypatch)
     await cli._run_pair("default")
+    # PL3: telemetry is disabled in tests → the X-Client-Id value is None
+    # (the id never rides any wire); the posthog_id body field is gone.
     assert reg.version_calls == [
-        (("@chat4000/hermes-plugin", "1.1.0", "production"), {"posthog_id": "test-install-id"})
+        (("@chat4000/hermes-plugin", "1.1.0", "production"), {"client_id": None})
     ]
+    names = _names(events)
     for expected in (
         "pairing_started",
         "plugin_onboarded",
         "pairing_code_registered",
         "pairing_completed",
     ):
-        assert expected in events, f"{expected} missing from {events}"
+        assert expected in names, f"{expected} missing from {names}"
+    # FLW3/FLW4: the join event carries the phone's id + super property.
+    completed_props = dict(events[names.index("pairing_completed")][1] or {})
+    assert completed_props["paired_client_id"] == "phone-cid-1"
+    assert registered == ["phone-cid-1"]
 
 
 async def test_expired_fires_pairing_expired(monkeypatch):
@@ -81,8 +93,8 @@ async def test_expired_fires_pairing_expired(monkeypatch):
     monkeypatch.setattr(cli, "_registrar", lambda: _ExpiredReg())
     events = _capture(monkeypatch)
     await cli._run_pair("default")
-    assert "pairing_expired" in events
-    assert "pairing_completed" not in events
+    assert "pairing_expired" in _names(events)
+    assert "pairing_completed" not in _names(events)
 
 
 def test_handle_cli_error_tracks_pairing_failed_and_exits_nonzero(monkeypatch):
@@ -92,7 +104,7 @@ def test_handle_cli_error_tracks_pairing_failed_and_exits_nonzero(monkeypatch):
     with pytest.raises(SystemExit) as ei:
         cli._handle_cli_error(RegistrarError(502, "M_HOMESERVER_UNAVAILABLE", "down"))
     assert ei.value.code == 1  # non-zero so the wizard knows it failed
-    assert "pairing_failed" in events
+    assert "pairing_failed" in _names(events)
 
 
 async def test_registrar_down_fires_version_check_failed(monkeypatch):
@@ -103,5 +115,5 @@ async def test_registrar_down_fires_version_check_failed(monkeypatch):
     events = _capture(monkeypatch)
     with contextlib.suppress(RegistrarError):
         await cli._run_pair("default")
-    assert "pairing_started" in events
-    assert "version_check_failed" in events
+    assert "pairing_started" in _names(events)
+    assert "version_check_failed" in _names(events)

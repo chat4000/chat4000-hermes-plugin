@@ -80,8 +80,8 @@ class FakeRegistrar:
         self.statuses = list(statuses or [])
         self.register_error = register_error
 
-    async def plugin_version(self, app_id, *, posthog_id=None):
-        self.calls.append((app_id, posthog_id))
+    async def plugin_version(self, app_id, *, client_id=None):
+        self.calls.append((app_id, client_id))
         return PluginVersion(current_version=self.version, source=self.source)
 
     async def register(
@@ -164,7 +164,7 @@ async def test_plugin_update_runs_registrar_install_script_and_schedules_restart
         s,
         version="2.1.0",
         registrar=reg,
-        posthog_id="ph_test",
+        client_id="ph_test",
         installer_runner=install,
         restart_scheduler=lambda: restarted.append(True),
     ).handle("!control:hs", "plugin.update", {})
@@ -183,7 +183,7 @@ async def test_plugin_update_runs_registrar_install_script_and_schedules_restart
 async def test_update_check_is_readonly():
     s = FakeSession()
     reg = FakeRegistrar()
-    await CommandHandler(s, version="2.1.0", registrar=reg, posthog_id="ph_test").handle(
+    await CommandHandler(s, version="2.1.0", registrar=reg, client_id="ph_test").handle(
         "!control:hs", "plugin.update_check", {}
     )
     _, content, _ = s.crypto.sent[-1]
@@ -199,7 +199,7 @@ async def test_update_check_is_readonly():
 async def test_update_check_reports_invalid_install_source_as_blocker():
     s = FakeSession()
     reg = FakeRegistrar(source="not-a-url")
-    await CommandHandler(s, version="2.1.0", registrar=reg, posthog_id="ph_test").handle(
+    await CommandHandler(s, version="2.1.0", registrar=reg, client_id="ph_test").handle(
         "!control:hs", "plugin.update_check", {}
     )
     _, content, _ = s.crypto.sent[-1]
