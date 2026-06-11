@@ -40,6 +40,10 @@ from .telemetry import (
 
 APP_ID = "@chat4000/hermes-plugin"
 
+# QR payload base for pairing. An https universal link (not the chat4000://
+# scheme) so any stock camera app can scan it.
+PAIR_LINK_BASE = "https://pair.chat4000.com"
+
 REGISTRAR_URLS = registrar_config.REGISTRAR_URLS
 DEFAULT_SERVICE_TOKEN = registrar_config.DEFAULT_SERVICE_TOKEN
 
@@ -305,7 +309,10 @@ async def _run_pair(account: str) -> None:
     analytics.track("pairing_code_registered", {"env": env})
     click.echo("")
     click.echo(f"  Pairing code:  {code[:3]} {code[3:]}")
-    _render_qr_if_possible(f"chat4000://pair?code={code}")
+    # Universal link, not a custom scheme — any camera app can scan it: the
+    # browser opens pair.chat4000.com, which deep-links into the app (or shows
+    # install instructions when the app isn't there yet).
+    _render_qr_if_possible(f"{PAIR_LINK_BASE}/?code={code}")
     click.echo("Enter this code in the chat4000 app. Waiting for the device…")
     click.echo("(Ctrl-C to stop.)")
 
