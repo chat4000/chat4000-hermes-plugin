@@ -240,8 +240,8 @@ def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (unty
 
         from . import analytics
 
-        analytics.track("telemetry_preference_changed", {"enabled": False})
-        analytics.flush()
+        # DEC3: no machine-side telemetry_preference_changed event — the toggle
+        # just goes quiet (the iOS event of the same name is the client's own).
         analytics.shutdown()
         set_telemetry_enabled(False)
         _c.echo("Telemetry disabled.")
@@ -251,11 +251,6 @@ def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (unty
         import click as _c
 
         set_telemetry_enabled(True)
-        from . import analytics
-
-        analytics.initialize_chat4000_analytics()
-        analytics.track("telemetry_preference_changed", {"enabled": True})
-        analytics.flush()
         _c.echo("Telemetry enabled.")
 
     return chat4000
@@ -306,27 +301,19 @@ async def _run_pair(
     # dropped it — that's why room creation silently did nothing.)
     _ensure_plugin_enabled_in_hermes_config()
 
-    first_run = load_bot_creds(account) is None
-    analytics.track("pairing_started", {"env": env, "first_run": first_run})
+    # DEC3: no plugin-side pair-funnel events — the funnel is observed
+    # registrar-side (pairing_started/completed/expired, version_checked).
 
     # Version gate (C.5) — refuse on force_upgrade, report to the operator.
+    # The registrar's own version_checked row (RG1) records the verdict.
     try:
         verdict = await reg.version(APP_ID, version, env, client_id=analytics.machine_client_id())
         if verdict.action == "force_upgrade":
-            analytics.track(
-                "version_force_upgrade",
-                {"client_version": version, "recommended": verdict.recommended},
-            )
             click.echo(f"Update required (>= {verdict.recommended}). Aborting.", err=True)
             sys.exit(2)
         if verdict.action == "recommend_upgrade":
-            analytics.track(
-                "version_recommend_upgrade",
-                {"client_version": version, "recommended": verdict.recommended},
-            )
             click.echo(f"Note: a newer version is recommended ({verdict.recommended}).")
     except RegistrarError as exc:
-        analytics.track("version_check_failed", {"reason": exc.errcode, "status": exc.status})
         click.echo(f"(version check skipped: {exc})")
 
     # Plugin setup (C.6, idempotent): bot identity, the plugin's one user
@@ -366,7 +353,6 @@ async def _run_pair(
         ),
         account,
     )
-    analytics.track("pairing_code_registered", {"env": env})
     click.echo("")
     click.echo(f"  Pairing code:  {code[:3]} {code[3:]}")
     # Universal link, not a custom scheme — any camera app can scan it: the
@@ -383,27 +369,19 @@ async def _run_pair(
             # A reusable code never settles to `completed` (C.3) and may well be
             # long-lived: no redeem inside the watch window is NOT an expiry.
             # The resident listener keeps watching until the code's real TTL.
-            analytics.flush()
+            # (No pairing_expired event either way — that's the registrar's row.)
             click.echo(
                 "No device has redeemed the code yet. It stays active until it "
                 "expires; the running gateway completes pairings as devices join."
             )
             return
-        analytics.track("pairing_expired", {"env": env})
-        analytics.flush()
         click.echo("Pairing code expired without a device redeeming it. Try again.")
         return
 
     add_known_user(user_id, account)
-    # FLW3/FLW4: the registrar hands us the redeeming phone's client_id —
-    # emit the machine↔phone join event and register the super property
-    # (latest pairing wins). Absent on old registrars / telemetry-off phones.
-    props: dict[str, Any] = {"env": env, "first_run": first_run}
-    paired_client_id = str(status.get("client_id") or "").strip() if status else ""
-    if paired_client_id:
-        analytics.register_paired_client_id(paired_client_id)
-        props["paired_client_id"] = paired_client_id
-    analytics.track("pairing_completed", props)
+    # PL4/FLW3-4: pairing_completed once per redeemed device, deduped against
+    # the gateway-resident listener via the pending-codes store.
+    _track_watcher_redeems(status or {}, code=code, account=account, reusable=reusable)
     analytics.flush()
     click.echo("")
     click.echo(f"✓ Paired {user_id}.")
@@ -412,6 +390,43 @@ async def _run_pair(
         click.echo(
             "The code is reusable — it stays active until expiry, and the running "
             "gateway enrolls further devices that redeem it automatically."
+        )
+
+
+def _track_watcher_redeems(
+    status: dict[str, Any], *, code: str, account: str, reusable: bool
+) -> None:
+    """PL4: emit `pairing_completed` once per redeem the CLI watcher observed,
+    deduped per device against the gateway-resident listener through the
+    pending-codes store's `redeemed_count_seen` check-and-set — the SAME field
+    the listener advances, so whichever poller records a redeem first reports
+    it and the other skips (the listener processes only entries beyond the
+    recorded count)."""
+    from . import analytics
+    from .matrix.pair_codes_store import load_pending_codes, update_pending_code
+    from .matrix.registrar_client import pair_redeem_index
+
+    redeems = [e for e in (status.get("redeems") or []) if isinstance(e, dict)]
+    count = int(status.get("redeemed_count") or 0) or len(redeems)
+    if not redeems:
+        # Old-registrar completed shape (no redeems[]): synthesize the one
+        # redeem from the top-level fields so the completion still counts.
+        redeems = [{"device_id": None, "client_id": status.get("client_id")}]
+        count = count or 1
+    record = next((r for r in load_pending_codes(account) if r.code == code), None)
+    seen = record.redeemed_count_seen if record is not None else 0
+    if count <= seen:
+        return  # the resident listener already recorded (and reported) these
+    new_n = count - seen
+    fresh = redeems[-new_n:] if new_n <= len(redeems) else redeems
+    if record is not None:
+        record.redeemed_count_seen = count
+        update_pending_code(record, account)
+    for entry in fresh:
+        analytics.track_pairing_completed(
+            str(entry.get("client_id") or "").strip() or None,
+            reusable=reusable,
+            redeem_index=pair_redeem_index(status, entry.get("device_id")),
         )
 
 
@@ -457,10 +472,6 @@ def _run_reset(account: str) -> None:
                 removed.append(str(p))
             except OSError:
                 pass
-    from . import analytics
-
-    analytics.track("reset_performed", {"removed_count": len(removed)})
-    analytics.flush()
     if not removed:
         click.echo(f'No chat4000 state for account "{account}".')
         return
@@ -479,16 +490,11 @@ def _run_uninstall() -> None:
 
     import click
 
-    from . import analytics
     from .key_store import resolve_chat4000_plugin_dir
 
     _disable_plugin_in_hermes_config()
     plugin_dir = resolve_chat4000_plugin_dir()
     existed = plugin_dir.exists()
-    # Track + flush BEFORE the rmtree — telemetry preference state lives under the
-    # plugin dir, so report the uninstall while it's still readable.
-    analytics.track("uninstall_performed", {"had_state": existed})
-    analytics.flush()
     removed = False
     if existed:
         try:
@@ -637,20 +643,14 @@ def _render_qr_if_possible(payload: str) -> None:
 
 
 def _handle_cli_error(exc: BaseException) -> None:
-    """Report a CLI failure and exit NON-ZERO so callers (the wizard) know it
-    failed. Operational registrar errors (backend down, bad token, code in use)
-    are tracked to PostHog and printed cleanly — NOT captured as Sentry crashes;
-    only unexpected errors get a Sentry trace."""
+    """Report a CLI failure and exit NON-ZERO so callers know it failed.
+    Operational registrar errors (backend down, bad token, code in use) are
+    printed cleanly — NOT captured as Sentry crashes (and per DEC3 not tracked
+    to PostHog either; the registrar observes its own failures); only
+    unexpected errors get a Sentry trace."""
     import click
 
     if isinstance(exc, RegistrarError):
-        from . import analytics
-
-        analytics.track(
-            "pairing_failed",
-            {"reason": exc.errcode, "status": exc.status, "env": _resolve_env()},
-        )
-        analytics.flush()
         click.echo(f"Pairing failed: {exc}", err=True)
         if exc.status in (0, 502, 503, 504):
             click.echo(

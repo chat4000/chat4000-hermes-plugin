@@ -4,10 +4,12 @@ Same opt-out semantics as Sentry: `chat4000 telemetry disable`,
 `CHAT4000_TELEMETRY_DISABLED=1`, or `--no-telemetry`. One toggle
 silences both Sentry and PostHog.
 
-Events fall into three buckets:
-  1. Installer (`installer_*`) — fired from scripts/installer.py
-  2. Pair lifecycle (`pairing_*`) — fired from pairing.py
-  3. Runtime (`gateway_*`, `relay_*`, `message_*`) — adapter.py / transport
+The plugin emits EXACTLY four lifecycle events (plan v5 DEC3 — nothing
+else; the 2026-06-01 "track every flow" funnel was removed 2026-06-12,
+its pair funnel is observed registrar-side):
+  - plugin_started (PL1) + container_rebuilt (PL5) — boot
+  - plugin_upgrading (PL2) — self-update start
+  - pairing_completed (PL4) — once per redeemed device
 
 distinct_id is the STABLE machine id `agent_install_id` (plan v5 IDN8,
 minted by machine_ids.py at the Hermes home root so it survives docker
@@ -16,13 +18,6 @@ rebuilds and plugin uninstalls). The churny env id
 every event; `paired_client_id` (FLW4, latest pairing wins) rides as an
 emulated super property the same way. Events go to the self-hosted
 PostHog instance only (INF5).
-
-Event name + property contract is documented (high-level) in the iOS
-client repo at docs/analytics-events-proposal.md. Server-side adds:
-  - installer_started / installer_package_installed / installer_failed
-  - gateway_started / gateway_stopped
-  - message_received_text / message_received_image / message_received_audio
-  - tool_call_completed
 """
 
 from __future__ import annotations
@@ -237,6 +232,28 @@ def _load_paired_client_id() -> str | None:
         return value or None
     except OSError:
         return None
+
+
+# ─── PL4: the pairing-completed join event ──────────────────────────────────
+
+
+def track_pairing_completed(
+    paired_client_id: str | None, *, reusable: bool, redeem_index: int | None
+) -> None:
+    """PL4/FLW3-4: the machine↔phone join event, once per redeemed device —
+    canonical props {paired_client_id?, reusable, redeem_index?} on every emit
+    site (CLI watcher, resident listener, device.pair_start watcher). Registers
+    the super property (latest pairing wins) when the redeeming phone's
+    client_id is present (absent on old registrars / telemetry-off phones — the
+    event still counts the completion). redeem_index is omitted when
+    underivable, never fabricated."""
+    props: dict[str, Any] = {"reusable": reusable}
+    if redeem_index is not None:
+        props["redeem_index"] = redeem_index
+    if paired_client_id:
+        register_paired_client_id(paired_client_id)
+        props["paired_client_id"] = paired_client_id
+    track("pairing_completed", props)
 
 
 # ─── Boot events (plan v5: PL1 + PL5) ───────────────────────────────────────

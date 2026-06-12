@@ -89,6 +89,23 @@ class RegistrarError(RuntimeError):
         return self.status in _TRANSIENT_HTTP_STATUSES
 
 
+def pair_redeem_index(status: dict[str, Any], device_id: object) -> int | None:
+    """PL4 `redeem_index` derivation (registry-documented): `/pair/status`
+    carries no per-entry index, so derive it from the wire fields —
+    `redeemed_count − len(redeems) + position(entry) + 1`, with
+    `redeemed_count` falling back to `len(redeems)` when absent/0. The
+    old-registrar completed shape (no `redeems[]`) counts as the single first
+    redeem → 1. None when the entry can't be located (never fabricate)."""
+    redeems = [e for e in (status.get("redeems") or []) if isinstance(e, dict)]
+    if not redeems:
+        return 1 if status.get("status") == "completed" else None
+    count = int(status.get("redeemed_count") or 0) or len(redeems)
+    for pos, entry in enumerate(redeems):
+        if entry.get("device_id") == device_id:
+            return count - len(redeems) + pos + 1
+    return None
+
+
 class RegistrarClient:
     def __init__(
         self, base_url: str, service_token: str | None = None, *, timeout: float = 15.0

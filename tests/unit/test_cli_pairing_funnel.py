@@ -1,4 +1,11 @@
-"""The pairing flow fires the full PostHog funnel.
+"""The CLI pair flow's analytics surface (plan v5 DEC3 + PL4).
+
+DEC3: the plugin emits NO pair-funnel events of its own — the funnel
+(pairing_started / pairing_expired / version_checked / pairing_failed) is
+observed registrar-side. The ONE plugin event here is PL4 `pairing_completed`,
+once per redeemed device, with the canonical props {paired_client_id?,
+reusable, redeem_index?}, deduped against the gateway-resident listener via
+the pending-codes store's `redeemed_count_seen` check-and-set.
 
 Mocks the registrar + captures analytics.track so we assert the events without
 network or a real PostHog client. (conftest disables real telemetry; we patch
@@ -123,7 +130,9 @@ def _names(events):
     return [e for e, _ in events]
 
 
-async def test_full_funnel_on_success(monkeypatch, fake_room_session):
+async def test_success_emits_only_pairing_completed_with_pl4_props(
+    monkeypatch, fake_room_session
+):
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
     reg = _OkReg()
     monkeypatch.setattr(cli, "_registrar", lambda: reg)
@@ -136,27 +145,65 @@ async def test_full_funnel_on_success(monkeypatch, fake_room_session):
     assert reg.version_calls == [
         (("@chat4000/hermes-plugin", "1.1.0", "production"), {"client_id": None})
     ]
-    names = _names(events)
-    for expected in (
-        "pairing_started",
-        "plugin_onboarded",
-        "pairing_code_registered",
-        "pairing_completed",
-    ):
-        assert expected in names, f"{expected} missing from {names}"
-    # FLW3/FLW4: the join event carries the phone's id + super property.
-    completed_props = dict(events[names.index("pairing_completed")][1] or {})
+    # DEC3: pairing_completed is the ONLY plugin event in the whole flow.
+    assert _names(events) == ["pairing_completed"]
+    # PL4 canonical props + FLW3/FLW4 join.
+    completed_props = dict(events[0][1] or {})
     assert completed_props["paired_client_id"] == "phone-cid-1"
+    assert completed_props["reusable"] is False
+    assert completed_props["redeem_index"] == 1
     assert registered == ["phone-cid-1"]
 
 
-async def test_expired_fires_pairing_expired(monkeypatch, fake_room_session):
+async def test_success_advances_the_dedupe_count_in_the_store(monkeypatch, fake_room_session):
+    """PL4 dedupe: the CLI watcher records the redeem it reported, so the
+    resident listener (which only processes entries beyond
+    `redeemed_count_seen`) never double-fires for the same device."""
+    from chat4000_hermes_plugin.matrix.pair_codes_store import load_pending_codes
+
+    monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
+    reg = _OkReg()
+    monkeypatch.setattr(cli, "_registrar", lambda: reg)
+    _capture(monkeypatch)
+    await cli._run_pair("default")
+    records = load_pending_codes("default")
+    assert len(records) == 1
+    assert records[0].redeemed_count_seen == 1
+
+
+async def test_watcher_skips_redeems_the_listener_already_recorded(monkeypatch, tmp_path):
+    """The other direction of the check-and-set: when the resident listener
+    won the race (`redeemed_count_seen` already covers the redeem), the CLI
+    watcher emits nothing."""
+    from chat4000_hermes_plugin.matrix.pair_codes_store import PendingCode, add_pending_code
+
+    events = _capture(monkeypatch)
+    add_pending_code(
+        PendingCode(code="111222", expires_at_ms=0, reusable=False, redeemed_count_seen=1),
+        "default",
+    )
+    cli._track_watcher_redeems(
+        {
+            "status": "completed",
+            "user_id": ENSURED_USER,
+            "client_id": "phone-cid-1",
+            "redeems": [{"device_id": "D1", "client_id": "phone-cid-1", "redeemed_at": 1}],
+            "redeemed_count": 1,
+        },
+        code="111222",
+        account="default",
+        reusable=False,
+    )
+    assert events == []
+
+
+async def test_expired_emits_no_plugin_events(monkeypatch, fake_room_session):
+    """DEC3: expiry is the registrar's pairing_expired row, not a plugin event."""
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
     monkeypatch.setattr(cli, "_registrar", lambda: _ExpiredReg())
     events = _capture(monkeypatch)
     await cli._run_pair("default")
-    assert "pairing_expired" in _names(events)
-    assert "pairing_completed" not in _names(events)
+    assert events == []
 
 
 async def test_pair_registers_bound_code_with_default_flags(monkeypatch, fake_room_session):
@@ -187,6 +234,20 @@ async def test_pair_passes_ttl_and_reusable_through(monkeypatch, fake_room_sessi
     assert kwargs["reusable"] is True
 
 
+async def test_reusable_completion_carries_reusable_prop(monkeypatch, fake_room_session):
+    """PL4: a reusable code's redeem reports reusable=True on the event."""
+    monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
+    reg = _OkReg()
+    monkeypatch.setattr(cli, "_registrar", lambda: reg)
+    monkeypatch.setattr(analytics_mod, "register_paired_client_id", lambda v: None)
+    events = _capture(monkeypatch)
+    await cli._run_pair("default", reusable=True)
+    assert _names(events) == ["pairing_completed"]
+    props = dict(events[0][1] or {})
+    assert props["reusable"] is True
+    assert props["redeem_index"] == 1
+
+
 async def test_pair_records_outstanding_code_for_the_resident_listener(
     monkeypatch, fake_room_session
 ):
@@ -208,15 +269,14 @@ async def test_pair_records_outstanding_code_for_the_resident_listener(
     assert records[0].pair_id is None
 
 
-async def test_reusable_no_redeem_is_not_tracked_as_expired(monkeypatch, fake_room_session):
+async def test_reusable_no_redeem_emits_nothing(monkeypatch, fake_room_session):
     """A reusable code never settles (C.3): the watcher timing out without a
-    redeem is NOT an expiry — no pairing_expired event."""
+    redeem is NOT an expiry — and per DEC3 no plugin event either way."""
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
     monkeypatch.setattr(cli, "_registrar", lambda: _ExpiredReg())
     events = _capture(monkeypatch)
     await cli._run_pair("default", reusable=True)
-    assert "pairing_expired" not in _names(events)
-    assert "pairing_completed" not in _names(events)
+    assert events == []
 
 
 async def test_setup_runs_user_ensure_and_invites_before_the_code(monkeypatch, fake_room_session):
@@ -235,23 +295,22 @@ async def test_setup_runs_user_ensure_and_invites_before_the_code(monkeypatch, f
     ]
 
 
-def test_handle_cli_error_tracks_pairing_failed_and_exits_nonzero(monkeypatch):
-    import pytest
-
+def test_handle_cli_error_exits_nonzero_without_plugin_events(monkeypatch):
+    """DEC3: registrar failures are the registrar's to observe — the CLI prints
+    + exits non-zero but emits nothing."""
     events = _capture(monkeypatch)
     with pytest.raises(SystemExit) as ei:
         cli._handle_cli_error(RegistrarError(502, "M_HOMESERVER_UNAVAILABLE", "down"))
-    assert ei.value.code == 1  # non-zero so the wizard knows it failed
-    assert "pairing_failed" in _names(events)
+    assert ei.value.code == 1  # non-zero so callers know it failed
+    assert events == []
 
 
-async def test_registrar_down_fires_version_check_failed(monkeypatch):
-    # version() 502 is non-fatal (skipped); then self_onboard 502 raises → caller
-    # handles + tracks pairing_failed. Here we assert the version_check_failed event.
+async def test_registrar_down_emits_no_plugin_events(monkeypatch):
+    # version() 502 is non-fatal (skipped); then self_onboard 502 raises → the
+    # caller handles it. DEC3: neither failure produces a plugin event.
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
     monkeypatch.setattr(cli, "_registrar", lambda: _Down502Reg())
     events = _capture(monkeypatch)
     with contextlib.suppress(RegistrarError):
         await cli._run_pair("default")
-    assert "pairing_started" in _names(events)
-    assert "version_check_failed" in _names(events)
+    assert events == []

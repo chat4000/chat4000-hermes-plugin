@@ -354,19 +354,22 @@ class CommandHandler:
                     self._listener.release(code)
 
     def _emit_pairing_completed(self, status: dict[str, Any]) -> None:
-        """PL4/FLW3-4: the /pair/status completed payload may carry the
-        redeeming phone's client_id — emit the machine↔phone join event and
-        register the super property (latest pairing wins). The id is absent on
-        old registrars / telemetry-off phones; the event still counts the
+        """PL4/FLW3-4 for the in-process `device.pair_start` watcher (it
+        claim()s its code, so the resident listener never double-reports).
+        pair_start codes are single-use by construction (reusable=False at
+        registration); the redeeming phone's client_id is absent on old
+        registrars / telemetry-off phones — the event still counts the
         completion."""
         from .. import analytics
+        from .registrar_client import pair_redeem_index
 
-        props: dict[str, Any] = {"flow": "device_pair"}
-        paired_client_id = str(status.get("client_id") or "").strip()
-        if paired_client_id:
-            analytics.register_paired_client_id(paired_client_id)
-            props["paired_client_id"] = paired_client_id
-        analytics.track("pairing_completed", props)
+        redeems = [e for e in (status.get("redeems") or []) if isinstance(e, dict)]
+        entry: dict[str, Any] = redeems[-1] if redeems else {}
+        analytics.track_pairing_completed(
+            str(entry.get("client_id") or status.get("client_id") or "").strip() or None,
+            reusable=False,
+            redeem_index=pair_redeem_index(status, entry.get("device_id")),
+        )
 
     async def _pair_status(self, pair_id: str, state: str, *, error: str | None = None) -> None:
         control = self._rooms.control_room_id
@@ -495,16 +498,8 @@ class CommandHandler:
     # ─── reply ────────────────────────────────────────────────────────────
 
     async def _reply(self, command: str, fields: dict[str, Any]) -> None:
-        # Coarse, content-free: which command ran and whether it succeeded.
-        try:
-            from .. import analytics
-
-            analytics.track("command_handled", {"command": command, "ok": fields.get("ok")})
-        except Exception as exc:  # noqa: BLE001
-            # Analytics is best-effort; report once and keep replying.
-            from ..error_log import dump_chat4000_trace
-
-            dump_chat4000_trace("matrix.command_analytics", exc)
+        # DEC3: no command_handled event — the plugin's analytics surface is
+        # the four lifecycle events only.
         control = self._rooms.control_room_id
         if control is None:
             logger.warning("no control room; cannot reply to %s", command)

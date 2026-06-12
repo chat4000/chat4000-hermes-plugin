@@ -31,9 +31,8 @@ async def ensure_onboarded(
     if creds is not None:
         return creds
 
-    from . import analytics
     from .cli import _gen_code
-    from .registrar_config import build_registrar_client, resolve_env
+    from .registrar_config import build_registrar_client
 
     reg = registrar or build_registrar_client()
     redeemed = await reg.self_onboard(_gen_code(), device_name="hermes-plugin")
@@ -46,10 +45,6 @@ async def ensure_onboarded(
     )
     save_bot_creds(creds, account)
     logger.info("chat4000: self-onboarded bot identity %s", creds.user_id)
-    try:
-        analytics.track("plugin_onboarded", {"env": resolve_env(), "via": "boot"})
-    except Exception as exc:  # noqa: BLE001
-        from .error_log import dump_chat4000_trace
-
-        dump_chat4000_trace("onboarding.analytics", exc)
+    # DEC3: no plugin_onboarded event — the registrar's plugin_created row
+    # (EX-C) is the canonical record of this moment.
     return creds

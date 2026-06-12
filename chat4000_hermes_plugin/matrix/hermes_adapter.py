@@ -125,8 +125,6 @@ class Chat4000MatrixAdapter:
         except RuntimeError:
             self._loop = None
 
-        from .. import analytics
-
         creds = load_bot_creds(self._account_id)
         if creds is None:
             # Gateway-first: self-onboard the bot identity at startup so we can
@@ -139,11 +137,9 @@ class Chat4000MatrixAdapter:
                 from ..error_log import dump_chat4000_trace
 
                 logger.error("chat4000 v2: self-onboard failed: %s", exc)
-                analytics.track("gateway_connect_failed", {"reason": "onboard_failed"})
                 dump_chat4000_trace("matrix.onboard", exc)
                 return False
             if creds is None:
-                analytics.track("gateway_connect_failed", {"reason": "no_creds"})
                 return False
 
         self._session = MatrixSession(
@@ -188,7 +184,6 @@ class Chat4000MatrixAdapter:
             from ..error_log import dump_chat4000_trace
 
             logger.error("chat4000 v2 connect failed: %s", exc)
-            analytics.track("gateway_connect_failed", {"reason": type(exc).__name__})
             dump_chat4000_trace("matrix.connect", exc)
             return False
 
@@ -203,7 +198,6 @@ class Chat4000MatrixAdapter:
         # Resume completion listening for every outstanding pairing code (C.4) —
         # including codes registered before a restart and reusable ones.
         pair_listener.start()
-        analytics.track("gateway_started", {"transport": "matrix"})
         return True
 
     def _mark_ready(self) -> None:
@@ -290,8 +284,15 @@ class Chat4000MatrixAdapter:
         already-joined user inherits membership; room KEYING for the new device
         rides the plugin's normal next-send key share (never pre-shared, C.3).
         Our jobs: record the (one) user so the invite watch self-heals a missing
-        invite/initial room, and — for a `device.pair_start` code resumed after
-        a restart — the analytics join the in-process watcher would have done."""
+        invite/initial room, and the PL4 `pairing_completed` join event — once
+        per redeemed device, for EVERY code kind (late redeems of long-lived /
+        reusable codes included). Dedupe against the CLI watcher is the store's
+        `redeemed_count_seen` check-and-set: the listener only hands us entries
+        beyond the recorded count, and the CLI advances the same field when it
+        reports a redeem first. In-process `device.pair_start` watchers claim()
+        their code, so this never overlaps those either."""
+        from .. import analytics
+        from .registrar_client import pair_redeem_index
         from .users_store import add_known_user
 
         user_id = str(status.get("user_id") or "")
@@ -302,15 +303,11 @@ class Chat4000MatrixAdapter:
             entry.get("device_id"),
             record.reusable,
         )
-        if record.pair_id:
-            from .. import analytics
-
-            props: dict[str, Any] = {"flow": "device_pair"}
-            paired_client_id = str(entry.get("client_id") or status.get("client_id") or "").strip()
-            if paired_client_id:
-                analytics.register_paired_client_id(paired_client_id)
-                props["paired_client_id"] = paired_client_id
-            analytics.track("pairing_completed", props)
+        analytics.track_pairing_completed(
+            str(entry.get("client_id") or status.get("client_id") or "").strip() or None,
+            reusable=record.reusable,
+            redeem_index=pair_redeem_index(status, entry.get("device_id")),
+        )
 
     async def _on_pair_transition(
         self, record: PendingCode, state: str, status: dict[str, Any]
@@ -353,7 +350,8 @@ class Chat4000MatrixAdapter:
             self._session = None
         from .. import analytics
 
-        analytics.track("gateway_stopped", {})
+        # DEC3: no gateway_stopped event — just flush so any pending
+        # pairing_completed from the resident listener lands before exit.
         analytics.flush()
 
     # ─── inbound callbacks (from MatrixSession) ───────────────────────────

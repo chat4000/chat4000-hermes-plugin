@@ -193,5 +193,8 @@ async def test_device_pair_completion_emits_join_event(monkeypatch):
         await pending.task
     completed = [p for e, p in events if e == "pairing_completed"]
     assert completed and (completed[0] or {})["paired_client_id"] == "phone-cid-9"
-    assert (completed[0] or {})["flow"] == "device_pair"
+    # PL4 canonical props: device.pair_start codes are single-use, and the
+    # old-registrar completed shape (no redeems[]) counts as redeem 1.
+    assert (completed[0] or {})["reusable"] is False
+    assert (completed[0] or {})["redeem_index"] == 1
     assert registered == ["phone-cid-9"]
