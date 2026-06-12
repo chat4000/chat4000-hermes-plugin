@@ -23,12 +23,26 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Transient registrar trouble — worth retrying, never fatal to a poll:
+# 429 (rate limit), 502/503/504 (registrar down / dead nginx upstream), and
+# 0 (network-level connection errors; see _request's URLError mapping).
+_TRANSIENT_HTTP_STATUSES = frozenset({0, 429, 502, 503, 504})
+
+# Exponential backoff for transient errors inside `status()`: start ~2 s,
+# double up to 30 s. A bare `status()` call retries for at most
+# _STATUS_RETRY_BUDGET_S before the error surfaces; `poll_until_complete`
+# overrides the budget with its remaining deadline.
+_RETRY_INITIAL_BACKOFF_S = 2.0
+_RETRY_MAX_BACKOFF_S = 30.0
+_STATUS_RETRY_BUDGET_S = 90.0
 
 
 @dataclass
@@ -59,6 +73,12 @@ class RegistrarError(RuntimeError):
         super().__init__(f"{status} {errcode}: {error}")
         self.status = status
         self.errcode = errcode
+
+    @property
+    def is_transient(self) -> bool:
+        """Retryable: rate limit / gateway trouble / network — not a protocol
+        error. Other 4xx (bad code, bad token, …) keep failing fast."""
+        return self.status in _TRANSIENT_HTTP_STATUSES
 
 
 class RegistrarClient:
@@ -106,8 +126,35 @@ class RegistrarClient:
         )
 
     async def status(self, code: str) -> dict[str, Any]:
-        """C.3 — poll pairing completion. Bearer service token required."""
-        return await self._get(f"/pair/status?code={code}", auth=True)
+        """C.3 — poll pairing completion. Bearer service token required.
+
+        Transient registrar trouble (429 rate limit, 502/503/504, network
+        errors) is retried in place with exponential backoff (~2 s doubling
+        to 30 s, ≤ _STATUS_RETRY_BUDGET_S per call) — seen live: a single
+        /pair/status 429 (M_LIMIT_EXCEEDED) used to kill the pairing watcher
+        and lose the session. Non-transient errors still raise immediately."""
+        return await self._status_with_retry(code, budget_s=_STATUS_RETRY_BUDGET_S)
+
+    async def _status_with_retry(self, code: str, *, budget_s: float) -> dict[str, Any]:
+        """One `/pair/status` call that absorbs transient errors for up to
+        `budget_s` seconds (backoff sleeps never overrun the budget; the
+        first attempt is always made). On a still-failing registrar the last
+        transient error is raised for the caller's deadline to judge."""
+        give_up_at = time.monotonic() + budget_s
+        backoff = _RETRY_INITIAL_BACKOFF_S
+        while True:
+            try:
+                return await self._get(f"/pair/status?code={code}", auth=True)
+            except RegistrarError as e:
+                if not e.is_transient or time.monotonic() + backoff > give_up_at:
+                    raise
+                logger.warning(
+                    "transient registrar error on /pair/status (%s) — retrying in %.0f s",
+                    e,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, _RETRY_MAX_BACKOFF_S)
 
     async def version(
         self,
@@ -154,17 +201,32 @@ class RegistrarClient:
         """Poll `/pair/status` until `completed` (→ returns the full status
         payload: `user_id`, and `client_id` when the redeeming device sent one
         — FLW2), `expired` (→ None), or the deadline. Respects the ≥1 s
-        poll-rate rule."""
-        waited = 0.0
-        while waited < deadline_s:
-            s = await self.status(code)
+        poll-rate rule.
+
+        Transient registrar errors (429/502/503/504/network) never abort the
+        loop — the pairing session must survive a momentary rate limit. They
+        are backed off and retried inside the remaining deadline budget; a
+        registrar still broken at the deadline ends as a timeout (None),
+        exactly like a code nobody redeemed. Non-transient errors raise."""
+        deadline = time.monotonic() + deadline_s
+        while time.monotonic() < deadline:
+            try:
+                s = await self._status_with_retry(
+                    code, budget_s=max(0.0, deadline - time.monotonic())
+                )
+            except RegistrarError as e:
+                if not e.is_transient:
+                    raise
+                # Expected + handled: keep polling until the deadline says stop.
+                logger.warning("registrar still unavailable while pairing (%s) — polling on", e)
+                await asyncio.sleep(interval)
+                continue
             st = s.get("status")
             if st == "completed":
                 return s
             if st == "expired":
                 return None
             await asyncio.sleep(interval)
-            waited += interval
         return None
 
     # ─── transport ────────────────────────────────────────────────────────
