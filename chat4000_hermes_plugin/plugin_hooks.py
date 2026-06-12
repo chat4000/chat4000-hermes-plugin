@@ -237,8 +237,15 @@ def on_post_llm_call(
     )
     if user_msg_count > 2:
         return
-    room = adapter._room_for_session(session_id)
+    # The room comes from Hermes' task-local chat contextvar FIRST (read
+    # synchronously on this worker thread, exactly like pre_tool_call): the
+    # hook's session_id is the RUNTIME id (e.g. 20260612_0653…), which never
+    # matches the session map's build_session_key keys on Hermes <=0.14 —
+    # map-only resolution silently never started a poll (the hermes-test-86
+    # missing-rename bug).
+    room = _current_chat_id() or adapter._room_for_session(session_id)
     if not room:
+        logger.debug("title poll: no room resolvable for session %s", session_id)
         return
     if session_id in _TITLE_POLLS_ACTIVE or room in _TITLE_APPLIED_ROOMS:
         return

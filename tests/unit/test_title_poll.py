@@ -141,6 +141,33 @@ async def test_dedupe_two_hook_fires_one_poller(monkeypatch):
         _clear()
 
 
+async def test_contextvar_room_wins_when_session_map_misses(monkeypatch):
+    """Hermes <=0.14 passes the RUNTIME session id to post_llm_call, which never
+    matches the session map's build_session_key keys — the room must then come
+    from the task-local chat contextvar (the hermes-test-86 bug)."""
+    a = FakeAdapter(asyncio.get_running_loop(), room=None)  # map miss
+    h.register_active_adapter(a)
+    _clear()
+    started: list[tuple[str, str]] = []
+
+    async def fake_poll(adapter, session_id, room):
+        started.append((session_id, room))
+
+    monkeypatch.setattr(h, "_poll_host_title", fake_poll)
+    monkeypatch.setattr(h, "_current_chat_id", lambda: "!ctxroom")
+    try:
+        h.on_post_llm_call(
+            session_id="20260612_065320_0a14a1aa",
+            conversation_history=_HISTORY_FIRST_EXCHANGE,
+            platform="chat4000",
+        )
+        await _drain()
+        assert started == [("20260612_065320_0a14a1aa", "!ctxroom")]
+    finally:
+        h.deregister_active_adapter(a)
+        _clear()
+
+
 async def test_already_titled_room_is_not_repolled(monkeypatch):
     a = FakeAdapter(asyncio.get_running_loop())
     h.register_active_adapter(a)
