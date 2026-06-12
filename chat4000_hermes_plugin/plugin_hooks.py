@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import weakref
 from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any
@@ -156,15 +157,44 @@ def on_session_end(*, session_id: str = "", **_: object) -> None:
 # ─── host auto-title pickup (post_llm_call → state.db poll) ─────────────────
 
 
-def _load_session_db() -> Any:  # noqa: ANN401  # host class is untyped (Any)
-    """Lazily import the host's SessionDB class. `hermes_state` only exists
-    inside the Hermes host process — unit tests/CI don't have it — so an
-    ImportError means "not in a host" and the caller gives up silently."""
+class _RawTitleReader:
+    """Read-only title reader for hosts whose SessionDB predates `read_only=`
+    (Hermes <=0.14). Opens state.db via a `mode=ro` sqlite URI — a writable
+    `SessionDB()` is never acceptable from the plugin (its __init__ runs schema
+    reconciliation DDL against the gateway's live DB). `check_same_thread=False`
+    because each asyncio.to_thread hop may land on a different executor thread;
+    the poll loop itself is strictly sequential, so the connection is never
+    used concurrently."""
+
+    def __init__(self, db_path: str) -> None:
+        self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+
+    def get_session_title(self, session_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT title FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        title = row[0] if row else None
+        return str(title) if title else None
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def _open_title_reader() -> Any:  # noqa: ANN401  # host SessionDB | _RawTitleReader | None
+    """Open a READ-ONLY title reader against the host's state.db. `hermes_state`
+    only exists inside the Hermes host process — unit tests/CI don't have it —
+    so an ImportError means "not in a host" and the caller gives up silently.
+    Hermes >=0.15 gets the purpose-built SessionDB read-only mode; on <=0.14
+    (no `read_only` kwarg — the hermes-test-87 TypeError) we fall back to the
+    raw ro-URI reader above rather than ever opening writable."""
     try:
-        from hermes_state import SessionDB
+        from hermes_state import DEFAULT_DB_PATH, SessionDB
     except ImportError:
         return None
-    return SessionDB
+    try:
+        return SessionDB(read_only=True)
+    except TypeError:
+        return _RawTitleReader(str(DEFAULT_DB_PATH))
 
 
 async def _poll_host_title(adapter: Chat4000MatrixAdapter, session_id: str, room: str) -> None:
@@ -175,11 +205,10 @@ async def _poll_host_title(adapter: Chat4000MatrixAdapter, session_id: str, room
     failed); unexpected errors are reported once and never raised."""
     db: Any = None
     try:
-        session_db_cls = _load_session_db()
-        if session_db_cls is None:
+        db = await asyncio.to_thread(_open_title_reader)
+        if db is None:
             logger.debug("chat4000 title poll: hermes_state unavailable, skipping")
             return
-        db = await asyncio.to_thread(session_db_cls, read_only=True)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _TITLE_POLL_BUDGET_S
         while True:

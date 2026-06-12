@@ -37,14 +37,13 @@ class FakeAdapter:
 
 
 def _fake_db_cls(titles):
-    """A stand-in for hermes_state.SessionDB: each get_session_title() pops the
-    next entry of `titles` (then keeps returning None — never-titled session)."""
+    """A stand-in reader (the _open_title_reader seam): each get_session_title()
+    pops the next entry of `titles` (then keeps returning None)."""
 
     class _DB:
         instances: list = []
 
-        def __init__(self, read_only=False):
-            assert read_only is True  # plugin must NEVER open state.db writable
+        def __init__(self):
             self._seq = list(titles)
             self.closed = False
             _DB.instances.append(self)
@@ -79,7 +78,7 @@ async def test_title_applied_on_second_poll(monkeypatch):
     _clear()
     _patch_timing(monkeypatch)
     db_cls = _fake_db_cls([None, "Fix login flow"])
-    monkeypatch.setattr(h, "_load_session_db", lambda: db_cls)
+    monkeypatch.setattr(h, "_open_title_reader", db_cls)
     try:
         await h._poll_host_title(a, "s1", "!room")
         assert a.applied == [("!room", "Fix login flow")]  # once, right room+title
@@ -94,7 +93,7 @@ async def test_timeout_gives_up_silently(monkeypatch):
     _clear()
     _patch_timing(monkeypatch, budget=0.0)  # deadline passes after the 1st read
     db_cls = _fake_db_cls([])  # host never titles the session
-    monkeypatch.setattr(h, "_load_session_db", lambda: db_cls)
+    monkeypatch.setattr(h, "_open_title_reader", db_cls)
     try:
         await h._poll_host_title(a, "s1", "!room")  # must not raise
         assert a.applied == []
@@ -115,6 +114,61 @@ async def test_missing_hermes_state_is_silent_noop(monkeypatch):
         assert a.applied == []
     finally:
         _clear()
+
+
+def test_reader_prefers_sessiondb_read_only_mode(monkeypatch):
+    """Hermes >=0.15: SessionDB(read_only=True) is used directly."""
+    import types
+
+    fake = types.ModuleType("hermes_state")
+
+    class _RoDB:
+        def __init__(self, read_only=False):
+            assert read_only is True  # plugin must NEVER open state.db writable
+            self.ro = read_only
+
+    fake.SessionDB = _RoDB
+    fake.DEFAULT_DB_PATH = "/nonexistent"
+    monkeypatch.setitem(sys.modules, "hermes_state", fake)
+    reader = h._open_title_reader()
+    assert isinstance(reader, _RoDB) and reader.ro is True
+
+
+def test_reader_falls_back_to_raw_ro_sqlite_on_old_hosts(monkeypatch, tmp_path):
+    """Hermes <=0.14: SessionDB has no read_only kwarg (TypeError — the
+    hermes-test-87 crash). The reader must drop to a raw mode=ro sqlite URI
+    connection that can read titles but can never write."""
+    import sqlite3
+    import types
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT)")
+    conn.execute("INSERT INTO sessions VALUES ('s1', 'Top CNBC News Headlines')")
+    conn.commit()
+    conn.close()
+
+    class _OldDB:
+        # 0.14 signature: no read_only kwarg → calling with read_only=True
+        # raises TypeError before __init__ runs; the body guards against any
+        # writable construction attempt.
+        def __init__(self, db_path=None):
+            raise AssertionError("plugin must not construct a writable SessionDB")
+
+    fake = types.ModuleType("hermes_state")
+    fake.SessionDB = _OldDB
+    fake.DEFAULT_DB_PATH = db_path
+    monkeypatch.setitem(sys.modules, "hermes_state", fake)
+
+    reader = h._open_title_reader()
+    assert isinstance(reader, h._RawTitleReader)
+    assert reader.get_session_title("s1") == "Top CNBC News Headlines"
+    assert reader.get_session_title("missing") is None
+    import pytest
+
+    with pytest.raises(sqlite3.OperationalError):  # mode=ro: writes are impossible
+        reader._conn.execute("INSERT INTO sessions VALUES ('x', 'y')")
+    reader.close()
 
 
 async def test_dedupe_two_hook_fires_one_poller(monkeypatch):
