@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlparse
 
+from .pair_codes_store import PendingCode
 from .registrar_client import RegistrarError
 from .rooms import DEFAULT_SESSION_ROOM_NAME
 
@@ -70,6 +71,23 @@ class RegistrarCommandClient(Protocol):
     async def status(self, code: str) -> dict[str, Any]: ...
 
 
+class PairWatchCoordinator(Protocol):
+    """The completion listener's coordination surface (pair_listener.py).
+
+    `device.pair_start` codes are persisted so the resident listener resumes
+    them after a restart (C.4: outstanding codes are persistent state); while
+    this handler's own poll task runs, the code is `claim`ed so the listener
+    doesn't double-poll it."""
+
+    def persist(self, record: PendingCode) -> None: ...
+
+    def claim(self, code: str) -> None: ...
+
+    def release(self, code: str) -> None: ...
+
+    def discard(self, code: str) -> None: ...
+
+
 InstallerRunner = Callable[[str], Awaitable[None]]
 RestartScheduler = Callable[[], None]
 
@@ -103,6 +121,7 @@ class CommandHandler:
         client_id: str | None = None,
         installer_runner: InstallerRunner | None = None,
         restart_scheduler: RestartScheduler | None = None,
+        listener: PairWatchCoordinator | None = None,
     ) -> None:
         self._s = session
         self._version = version
@@ -110,6 +129,7 @@ class CommandHandler:
         self._client_id = client_id
         self._installer_runner = installer_runner or run_install_script
         self._restart_scheduler = restart_scheduler or schedule_gateway_restart
+        self._listener = listener
         self._pairings: dict[str, PendingPairing] = {}
 
     @property
@@ -218,7 +238,7 @@ class CommandHandler:
         code = _gen_device_pair_code()
         registrar = self._registrar_client()
         try:
-            await registrar.register(
+            reg_resp = await registrar.register(
                 code,
                 kind="user",
                 plugin_id=plugin_id,
@@ -228,6 +248,24 @@ class CommandHandler:
         except RegistrarError as exc:
             await self._fail_pair_start(pair_id, str(exc))
             return
+
+        # Persist the outstanding code (C.4: it survives a restart — the
+        # resident listener then resumes it) and claim it so the listener
+        # doesn't double-poll while our own lifecycle task runs.
+        if self._listener is not None:
+            now_ms = int(time.time() * 1000)
+            self._listener.persist(
+                PendingCode(
+                    code=code,
+                    expires_at_ms=int(
+                        reg_resp.get("expires_at") or now_ms + DEVICE_PAIR_TTL_SECONDS * 1000
+                    ),
+                    reusable=False,
+                    registered_at_ms=now_ms,
+                    pair_id=pair_id,
+                )
+            )
+            self._listener.claim(code)
 
         deadline = time.monotonic() + DEVICE_PAIR_TTL_SECONDS
         await self._reply("device.pair_start", {"pair_id": pair_id, "code": code})
@@ -262,20 +300,27 @@ class CommandHandler:
         attempt.task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await attempt.task
+        if self._listener is not None:
+            # Cancelled: stop watching everywhere (the registrar has no revoke —
+            # the code dies at its short TTL; nobody is expected to redeem it).
+            self._listener.discard(attempt.code)
         await self._reply("device.pair_cancel", {"pair_id": pair_id})
         await self._pair_status(pair_id, "cancelled")
 
     async def _poll_pairing(self, pair_id: str, code: str, deadline: float) -> None:
         registrar = self._registrar_client()
+        settled = False
         try:
             while time.monotonic() < deadline:
                 status = await registrar.status(code)
                 state = status.get("status")
                 if state == "completed":
+                    settled = True
                     self._emit_pairing_completed(status)
                     await self._pair_status(pair_id, "completed")
                     return
                 if state == "expired":
+                    settled = True
                     await self._pair_status(pair_id, "expired")
                     return
                 if state not in ("pending", None):
@@ -285,6 +330,7 @@ class CommandHandler:
                 if sleep_for <= 0:
                     break
                 await asyncio.sleep(sleep_for)
+            settled = True
             await self._pair_status(pair_id, "expired")
         except asyncio.CancelledError:
             raise
@@ -297,6 +343,15 @@ class CommandHandler:
             await self._pair_status(pair_id, "error", error=str(exc))
         finally:
             self._pairings.pop(pair_id, None)
+            if self._listener is not None:
+                if settled:
+                    # Completed/expired: nothing outstanding remains.
+                    self._listener.discard(code)
+                else:
+                    # Cancelled mid-watch or our poll died (error path): the code
+                    # may still be live — hand it back to the resident listener,
+                    # which keeps polling it for the rest of its lifetime (C.4).
+                    self._listener.release(code)
 
     def _emit_pairing_completed(self, status: dict[str, Any]) -> None:
         """PL4/FLW3-4: the /pair/status completed payload may carry the

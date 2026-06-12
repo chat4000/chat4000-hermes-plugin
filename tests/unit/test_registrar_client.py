@@ -146,3 +146,65 @@ def test_is_transient_classification():
         assert RegistrarError(status, "X", "x").is_transient, status
     for status in (400, 401, 403, 404, 409, 500):
         assert not RegistrarError(status, "X", "x").is_transient, status
+
+
+async def test_poll_returns_when_a_reusable_code_has_redeems(clock, monkeypatch):
+    """C.3: a reusable code never settles to `completed` — a watcher waiting for
+    "someone paired" must check `redeems` non-empty, not `status`."""
+    paired = {
+        "status": "pending",  # stays pending while live (reusable)
+        "user_id": "@u:hs",
+        "redeems": [{"device_id": "D1", "redeemed_at": 1}],
+        "redeemed_count": 1,
+        "expires_at": 9999999999999,
+    }
+    client, calls = _scripted_client(
+        monkeypatch, [{"status": "pending", "redeems": [], "redeemed_count": 0}, paired]
+    )
+    result = await client.poll_until_complete("CODE123", deadline_s=300.0)
+    assert result == paired
+    assert calls["n"] == 2
+
+
+async def test_user_ensure_posts_plugin_id_and_parses_result(monkeypatch):
+    """C.6.1 — /user/ensure request/response shape."""
+    client = RegistrarClient("https://registrar.example", "svc-token")
+    seen = {}
+
+    async def fake_post(path, body, *, auth, client_id=None):
+        seen.update({"path": path, "body": body, "auth": auth})
+        return {"user_id": "@u_one:hs", "created": True}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    result = await client.user_ensure("11111111-2222-3333-4444-555555555555")
+    assert seen == {
+        "path": "/user/ensure",
+        "body": {"plugin_id": "11111111-2222-3333-4444-555555555555"},
+        "auth": True,
+    }
+    assert result.user_id == "@u_one:hs"
+    assert result.created is True
+
+
+async def test_register_sends_reusable_and_ttl_only_when_set(monkeypatch):
+    """C.1 wire shape: ttl_seconds/reusable ride only when the caller asked —
+    the default register body is unchanged by the redesign."""
+    client = RegistrarClient("https://registrar.example", "svc-token")
+    bodies = []
+
+    async def fake_post(path, body, *, auth, client_id=None):
+        assert path == "/pair/register" and auth is True
+        bodies.append(body)
+        return {"ok": True, "expires_at": 1}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    await client.register("123456", kind="user", plugin_id="p" * 36)
+    await client.register("654321", kind="user", plugin_id="p" * 36, ttl_seconds=600, reusable=True)
+    assert bodies[0] == {"code": "123456", "kind": "user", "plugin_id": "p" * 36}
+    assert bodies[1] == {
+        "code": "654321",
+        "kind": "user",
+        "plugin_id": "p" * 36,
+        "ttl_seconds": 600,
+        "reusable": True,
+    }

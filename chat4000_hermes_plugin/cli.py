@@ -3,14 +3,19 @@
 Pairing is now a 6-digit OTP via the registrar (protocol C), not the v1 relay
 handshake:
 
-  pair   — self-onboard the bot identity on first run, then register a 6-digit
-           user code, show it (+ QR), poll until the device redeems, and record
-           the paired user so the running gateway invites them.
+  pair   — run setup (C.6: self-onboard, /user/ensure, space + control room +
+           invites) on first run, then register a 6-digit user code BOUND to the
+           plugin's one user, show it (+ QR), and poll for immediate feedback.
+           The gateway-resident completion listener is the system of record for
+           the code's whole lifetime; this watcher is install feedback only.
+           `--ttl <seconds>` and `--reusable` pass through to register (C.1).
+  prepare — setup only (identity + user + rooms), no pairing code.
   status — show the bot identity + paired users.
   reset  — wipe bot creds + crypto store + known users (destructive).
   uninstall — disable the plugin in the Hermes config + delete ALL plugin state
            (every account), then print the pip step (destructive, global).
-  wizard — interactive installer (unchanged).
+  wizard — DEPRECATED (the installer owns interactive installs); prints a note,
+           then still runs the legacy wizard so old installers keep working.
   telemetry — opt in/out (unchanged).
 
 Config (env): CHAT4000_REGISTRAR_URL (default prod), CHAT4000_SERVICE_TOKEN
@@ -100,15 +105,31 @@ def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (unty
         default=False,
         help="Pair against the stage servers (stgcht4.duckdns.org).",
     )
-    def cmd_pair(account: str, stage: bool) -> None:
-        """Onboard (first run) and pair a device with a 6-digit code."""
+    @click.option(
+        "--ttl",
+        "ttl_seconds",
+        type=int,
+        default=None,
+        help="Code lifetime in seconds (1-63072000, i.e. up to 2 years; "
+        "default: server config). Long-lived codes are standing credentials — "
+        "use the shortest TTL the use case allows.",
+    )
+    @click.option(
+        "--reusable",
+        is_flag=True,
+        default=False,
+        help="The code can be redeemed many times until expiry, each redeem "
+        "adding another device (fleet enrollment; single-use is the default).",
+    )
+    def cmd_pair(account: str, stage: bool, ttl_seconds: int | None, reusable: bool) -> None:
+        """Set up (first run) and pair a device with a 6-digit code."""
         if stage:
             os.environ["CHAT4000_ENV"] = "stage"
         # Persist whatever environment we're pairing against so future
         # invocations (status, a fresh shell, the gateway) stay on it.
         _persist_env(_resolve_env())
         try:
-            asyncio.run(_run_pair(account))
+            asyncio.run(_run_pair(account, ttl_seconds=ttl_seconds, reusable=reusable))
         except KeyboardInterrupt:
             click.echo("\nPairing cancelled.")
         except Exception as exc:  # noqa: BLE001
@@ -123,10 +144,11 @@ def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (unty
         help="Prepare against the stage servers (stgcht4.duckdns.org).",
     )
     def cmd_prepare(account: str, stage: bool) -> None:
-        """Pre-restart prep for the gateway-first install: persist the env, enable
-        the plugin in Hermes config, and self-onboard the bot identity — so the
-        gateway connects + bootstraps its rooms on the NEXT restart, before any
-        pairing. Fails fast if the registrar is unreachable."""
+        """Plugin setup (protocol C.6): persist the env, enable the plugin in the
+        Hermes config, self-onboard the bot identity, ensure the plugin's one
+        user (/user/ensure), and create the space + control room + invites via a
+        short-lived bot session — all BEFORE any device pairs. Idempotent.
+        Fails fast if the registrar is unreachable."""
         if stage:
             os.environ["CHAT4000_ENV"] = "stage"
         _persist_env(_resolve_env())
@@ -185,7 +207,18 @@ def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (unty
 
     @chat4000.command("wizard")
     def cmd_wizard() -> None:
-        """Interactive install wizard."""
+        """[DEPRECATED] Interactive install wizard — use the chat4000 installer."""
+        # Retired as the driven flow: the installer owns interactive installs.
+        # The wizard still RUNS after the note so existing installers that
+        # hand off to `chat4000 wizard` keep working (do not delete code).
+        click.echo("NOTE: `chat4000 wizard` is deprecated — the chat4000 installer now")
+        click.echo("owns interactive installs. Prefer the one-liner:")
+        click.echo("")
+        click.echo(
+            "  curl -fsSL https://raw.githubusercontent.com/chat4000/"
+            "chat4000-installer/main/install.sh | bash"
+        )
+        click.echo("")
         from .install_wizard import main as wizard_main
 
         sys.exit(wizard_main())
@@ -255,7 +288,9 @@ def main() -> None:
 # ─── pair flow ──────────────────────────────────────────────────────────────
 
 
-async def _run_pair(account: str) -> None:
+async def _run_pair(
+    account: str, *, ttl_seconds: int | None = None, reusable: bool = False
+) -> None:
     import click
 
     from . import analytics
@@ -294,18 +329,43 @@ async def _run_pair(account: str) -> None:
         analytics.track("version_check_failed", {"reason": exc.errcode, "status": exc.status})
         click.echo(f"(version check skipped: {exc})")
 
-    # Self-onboard the bot identity on first run (idempotent — the gateway may
-    # already have done this at startup in the gateway-first flow).
-    from .onboarding import ensure_onboarded
+    # Plugin setup (C.6, idempotent): bot identity, the plugin's one user
+    # (/user/ensure), and the space + control room + invites — all before any
+    # device pairs, so pairing below is purely a device operation.
+    from . import setup_flow
 
-    creds = await ensure_onboarded(account, registrar=reg)
-    if creds is None:
+    outcome = await setup_flow.ensure_setup(account, registrar=reg)
+    if outcome is None:
         click.echo("Could not onboard the plugin identity (registrar unreachable?).", err=True)
         return
+    creds = outcome.creds
 
-    # Register a user pairing code.
+    # Register a user pairing code — bound at registration to the plugin's one
+    # user via plugin_id (C.1); the registrar does the binding.
     code = _gen_code()
-    await reg.register(code, kind="user", plugin_id=creds.plugin_id)
+    register_resp = await reg.register(
+        code,
+        kind="user",
+        plugin_id=creds.plugin_id,
+        ttl_seconds=ttl_seconds,
+        reusable=reusable,
+    )
+    # Record the outstanding code durably: the gateway-resident completion
+    # listener owns it for its whole lifetime (C.4); the watcher below is only
+    # immediate install feedback.
+    import time as _time
+
+    from .matrix.pair_codes_store import PendingCode, add_pending_code
+
+    add_pending_code(
+        PendingCode(
+            code=code,
+            expires_at_ms=int(register_resp.get("expires_at") or 0),
+            reusable=reusable,
+            registered_at_ms=int(_time.time() * 1000),
+        ),
+        account,
+    )
     analytics.track("pairing_code_registered", {"env": env})
     click.echo("")
     click.echo(f"  Pairing code:  {code[:3]} {code[3:]}")
@@ -319,6 +379,16 @@ async def _run_pair(account: str) -> None:
     status = await reg.poll_until_complete(code)
     user_id = status.get("user_id") if status else None
     if not user_id:
+        if reusable:
+            # A reusable code never settles to `completed` (C.3) and may well be
+            # long-lived: no redeem inside the watch window is NOT an expiry.
+            # The resident listener keeps watching until the code's real TTL.
+            analytics.flush()
+            click.echo(
+                "No device has redeemed the code yet. It stays active until it "
+                "expires; the running gateway completes pairings as devices join."
+            )
+            return
         analytics.track("pairing_expired", {"env": env})
         analytics.flush()
         click.echo("Pairing code expired without a device redeeming it. Try again.")
@@ -338,21 +408,29 @@ async def _run_pair(account: str) -> None:
     click.echo("")
     click.echo(f"✓ Paired {user_id}.")
     click.echo("A running gateway invites them + shares keys within a few seconds (no restart).")
+    if reusable:
+        click.echo(
+            "The code is reusable — it stays active until expiry, and the running "
+            "gateway enrolls further devices that redeem it automatically."
+        )
 
 
 async def _run_prepare(account: str) -> None:
-    """Gateway-first prep: ensure the bot identity exists so the gateway connects
-    + bootstraps on its next restart, before any pairing."""
+    """Plugin setup (C.6): bot identity, the plugin's one user, and the space +
+    control room + invites — all created (idempotently) before any pairing."""
     import click
 
-    from .onboarding import ensure_onboarded
+    from . import setup_flow
 
-    creds = await ensure_onboarded(account, registrar=_registrar())
-    if creds is None:
+    outcome = await setup_flow.ensure_setup(account, registrar=_registrar())
+    if outcome is None:
         click.echo("Onboard failed — is the registrar reachable?", err=True)
         sys.exit(1)
-    click.echo(f"Plugin identity ready: {creds.user_id}")
-    click.echo(f"Gateway: {creds.gateway_url}")
+    click.echo(f"Plugin identity ready: {outcome.creds.user_id}")
+    click.echo(f"Gateway: {outcome.creds.gateway_url}")
+    click.echo(f"User: {outcome.user_id} ({'created' if outcome.user_created else 'existing'})")
+    click.echo(f"Space: {outcome.space_id or '(missing)'}")
+    click.echo(f"Control room: {outcome.control_room_id or '(missing)'}")
 
 
 def _run_reset(account: str) -> None:
@@ -365,6 +443,8 @@ def _run_reset(account: str) -> None:
     targets = [
         plugin_dir / f"matrix-creds-{safe}.json",
         plugin_dir / f"known-users-{safe}.json",
+        plugin_dir / f"onboarded-{safe}.json",
+        plugin_dir / f"pending-codes-{safe}.json",
         Path(crypto_store_path(account)),
         Path(crypto_store_path(account) + "-wal"),
         Path(crypto_store_path(account) + "-shm"),

@@ -55,6 +55,14 @@ class RedeemResult:
 
 
 @dataclass
+class UserEnsureResult:
+    """C.6.1 — the plugin's one user (`created` is False on an idempotent repeat)."""
+
+    user_id: str
+    created: bool
+
+
+@dataclass
 class VersionVerdict:
     action: str  # ok | recommend_upgrade | force_upgrade
     recommended: str | None
@@ -99,8 +107,14 @@ class RegistrarClient:
         plugin_id: str | None = None,
         user_id: str | None = None,
         ttl_seconds: int | None = None,
+        reusable: bool = False,
     ) -> dict[str, Any]:
-        """C.1 — reserve a pairing code. Bearer service token required."""
+        """C.1 — reserve a pairing code. Bearer service token required.
+
+        A `kind=user` code is bound AT REGISTRATION to the plugin's one user
+        (the account `/user/ensure` created for `plugin_id`); `user_id` is only
+        an integrity check, never a binding source. `reusable` codes can be
+        redeemed many times until expiry, each redeem adding another device."""
         body: dict[str, Any] = {"code": code, "kind": kind}
         if plugin_id is not None:
             body["plugin_id"] = plugin_id
@@ -108,7 +122,15 @@ class RegistrarClient:
             body["user_id"] = user_id
         if ttl_seconds is not None:
             body["ttl_seconds"] = ttl_seconds
+        if reusable:
+            body["reusable"] = True
         return await self._post("/pair/register", body, auth=True)
+
+    async def user_ensure(self, plugin_id: str) -> UserEnsureResult:
+        """C.6.1 — create (or return) the plugin's one user. Idempotent per
+        `plugin_id`: a repeat returns the same `user_id` with `created: false`."""
+        r = await self._post("/user/ensure", {"plugin_id": plugin_id}, auth=True)
+        return UserEnsureResult(user_id=str(r["user_id"]), created=bool(r.get("created", False)))
 
     async def redeem(self, code: str, *, device_name: str | None = None) -> RedeemResult:
         """C.2 — redeem a code (public). Used by the plugin to self-onboard a
@@ -198,10 +220,15 @@ class RegistrarClient:
     async def poll_until_complete(
         self, code: str, *, interval: float = 1.5, deadline_s: float = 300.0
     ) -> dict[str, Any] | None:
-        """Poll `/pair/status` until `completed` (→ returns the full status
-        payload: `user_id`, and `client_id` when the redeeming device sent one
-        — FLW2), `expired` (→ None), or the deadline. Respects the ≥1 s
-        poll-rate rule.
+        """Poll `/pair/status` until someone paired, the code expired (→ None),
+        or the deadline (→ None).
+
+        "Someone paired" (C.3) is `status == completed` OR `redeems` non-empty —
+        a REUSABLE code never settles to `completed` however many redeems it
+        has, so a watcher must check `redeems`, not `status`. On success the
+        full status payload is returned (`user_id`, `redeems`/`redeemed_count`,
+        and `client_id` when the redeeming device sent one — FLW2). Respects
+        the ≥1 s poll-rate rule.
 
         Transient registrar errors (429/502/503/504/network) never abort the
         loop — the pairing session must survive a momentary rate limit. They
@@ -222,7 +249,7 @@ class RegistrarClient:
                 await asyncio.sleep(interval)
                 continue
             st = s.get("status")
-            if st == "completed":
+            if st == "completed" or s.get("redeems"):
                 return s
             if st == "expired":
                 return None

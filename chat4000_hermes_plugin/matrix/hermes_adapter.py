@@ -31,11 +31,13 @@ from typing import TYPE_CHECKING, Any
 from ..package_info import read_package_version
 from .commands import CommandHandler
 from .creds_store import load_bot_creds
+from .pair_listener import CompletionListener
 from .session import MatrixSession
 from .turns import TurnWriter
 
 if TYPE_CHECKING:
     from .media import MediaClient
+    from .pair_codes_store import PendingCode
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,9 @@ class Chat4000MatrixAdapter:
         # live-invites anyone who pairs AFTER the gateway is up (no restart).
         self._invited: set[str] = set()
         self._invite_task: asyncio.Task[None] | None = None
+        # The pairing-completion listener (protocol C.4): the gateway-resident
+        # system of record for every outstanding pairing code.
+        self._pair_listener: CompletionListener | None = None
 
         # Make this adapter discoverable by plugin_hooks (tool bubbles).
         from ..plugin_hooks import register_active_adapter
@@ -148,7 +153,18 @@ class Chat4000MatrixAdapter:
             on_user_message=self._on_user_message,
             on_command=self._on_command,
         )
-        self._commands = CommandHandler(self._session, version=read_package_version())
+        from ..registrar_config import build_registrar_client
+
+        pair_listener = CompletionListener(
+            account_id=self._account_id,
+            registrar=build_registrar_client(),
+            on_redeem=self._on_pair_redeem,
+            on_transition=self._on_pair_transition,
+        )
+        self._pair_listener = pair_listener
+        self._commands = CommandHandler(
+            self._session, version=read_package_version(), listener=pair_listener
+        )
 
         from .media import MediaClient, media_base_from_gateway
 
@@ -184,6 +200,9 @@ class Chat4000MatrixAdapter:
         await self._session.wait_first_sync(timeout=30.0)
         self._mark_ready()  # 'gateway fully up' signal for the install wizard
         self._start_invite_watch()  # invite users who pair AFTER this point
+        # Resume completion listening for every outstanding pairing code (C.4) —
+        # including codes registered before a restart and reusable ones.
+        pair_listener.start()
         analytics.track("gateway_started", {"transport": "matrix"})
         return True
 
@@ -261,11 +280,70 @@ class Chat4000MatrixAdapter:
 
             dump_chat4000_trace("matrix.auto_initial_session", exc, {"user_id": user_id})
 
+    # ─── pairing completion (resident listener, protocol C.4) ─────────────
+
+    async def _on_pair_redeem(
+        self, record: PendingCode, status: dict[str, Any], entry: dict[str, Any]
+    ) -> None:
+        """A device redeemed an outstanding code. Membership needs nothing — the
+        user's invites pre-exist from setup (C.6) and a device added to an
+        already-joined user inherits membership; room KEYING for the new device
+        rides the plugin's normal next-send key share (never pre-shared, C.3).
+        Our jobs: record the (one) user so the invite watch self-heals a missing
+        invite/initial room, and — for a `device.pair_start` code resumed after
+        a restart — the analytics join the in-process watcher would have done."""
+        from .users_store import add_known_user
+
+        user_id = str(status.get("user_id") or "")
+        if user_id:
+            add_known_user(user_id, self._account_id)
+        logger.info(
+            "chat4000: pairing redeem observed (device=%s, reusable=%s)",
+            entry.get("device_id"),
+            record.reusable,
+        )
+        if record.pair_id:
+            from .. import analytics
+
+            props: dict[str, Any] = {"flow": "device_pair"}
+            paired_client_id = str(entry.get("client_id") or status.get("client_id") or "").strip()
+            if paired_client_id:
+                analytics.register_paired_client_id(paired_client_id)
+                props["paired_client_id"] = paired_client_id
+            analytics.track("pairing_completed", props)
+
+    async def _on_pair_transition(
+        self, record: PendingCode, state: str, status: dict[str, Any]
+    ) -> None:
+        """An outstanding code settled under the resident listener. Only
+        `device.pair_start` codes have a control-room lifecycle to finish — emit
+        the `chat4000.pair_status` event (E) the in-process watcher would have
+        sent had the gateway not restarted mid-window."""
+        if not record.pair_id or self._session is None:
+            return
+        rooms = self._session.rooms
+        crypto = self._session.crypto
+        control = rooms.control_room_id if rooms is not None else None
+        if control is None or crypto is None:
+            logger.warning("no control room; cannot send resumed pair status %s", state)
+            return
+        content = {
+            "msgtype": "chat4000.pair_status",
+            "pair_id": record.pair_id,
+            "state": state,
+        }
+        await crypto.send_room_event(
+            control, "m.room.message", content, self._session.recipients(control), push=False
+        )
+
     async def disconnect(self) -> None:
         self._connected = False
         if self._invite_task is not None:
             self._invite_task.cancel()
             self._invite_task = None
+        if self._pair_listener is not None:
+            await self._pair_listener.stop()
+            self._pair_listener = None
         self._clear_ready()
         from ..plugin_hooks import deregister_active_adapter
 

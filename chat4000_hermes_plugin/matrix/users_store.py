@@ -1,10 +1,20 @@
-"""Known-users store — the set of paired user MXIDs the plugin serves.
+"""Known-users store — the plugin's user MXID(s), durably recorded.
 
-When `chat4000 pair` completes, the paired user's MXID is recorded here. The
-running gateway adapter loads this on connect and (a) invites each to the space +
-control room and (b) shares room keys with them (`set_members`). Idempotent —
-inviting an already-joined user is benign, and key-sharing a known session is a
-no-op.
+One plugin = exactly ONE human user (protocol B): the account `/user/ensure`
+creates at setup, recorded here by `setup_flow.ensure_setup` (and, redundantly
+but idempotently, when a pairing completes — every code is bound to that same
+user, so re-adding is a no-op). Pairing never creates users; it only adds
+devices to the one user already in this store.
+
+The store keeps its list shape for backwards compatibility: a legacy store
+written before the one-user redesign may contain several MXIDs, and the gateway
+keeps serving all of them (dropping entries would orphan their rooms). New
+writes only ever add the plugin's single ensured user.
+
+The running gateway adapter loads this on connect and (a) invites each user to
+the space + control room and (b) shares room keys with them (`set_members`).
+Idempotent — inviting an already-joined user is benign, and key-sharing a known
+session is a no-op.
 
 Decoupling pairing (CLI process) from inviting (gateway process) this way means
 the CLI never needs the gateway socket or the crypto store.

@@ -329,3 +329,65 @@ async def test_unknown_command_replies_not_ok():
     await CommandHandler(s).handle("!control:hs", "bogus.cmd", {})
     _, content, _ = s.crypto.sent[-1]
     assert content["ok"] is False
+
+
+class FakeListener:
+    """Coordination half of pair_listener.CompletionListener (C.4)."""
+
+    def __init__(self):
+        self.persisted: list = []
+        self.claimed: list[str] = []
+        self.released: list[str] = []
+        self.discarded: list[str] = []
+
+    def persist(self, record):
+        self.persisted.append(record)
+
+    def claim(self, code):
+        self.claimed.append(code)
+
+    def release(self, code):
+        self.released.append(code)
+
+    def discard(self, code):
+        self.discarded.append(code)
+
+
+async def test_device_pair_start_persists_and_claims_for_the_listener(monkeypatch):
+    """C.4: the outstanding code is durable state (a restart hands it to the
+    resident listener) and claimed while this handler's own watcher runs."""
+    monkeypatch.setattr(matrix_commands, "_gen_device_pair_code", lambda: "428913")
+    monkeypatch.setattr(matrix_commands, "_gen_pair_id", lambda: "p_7af3c1")
+    s = FakeSession()
+    listener = FakeListener()
+    reg = FakeRegistrar(statuses=[{"status": "completed", "user_id": "@sender:hs"}])
+
+    await CommandHandler(s, registrar=reg, listener=listener).handle(
+        "!control:hs", "device.pair_start", {}, sender="@sender:hs"
+    )
+    assert len(listener.persisted) == 1
+    record = listener.persisted[0]
+    assert record.code == "428913"
+    assert record.pair_id == "p_7af3c1"
+    assert record.reusable is False
+    assert record.expires_at_ms == 123  # the register response's expires_at
+    assert listener.claimed == ["428913"]
+
+    await asyncio.sleep(0)  # let the watcher observe `completed`
+    # Settled in-process → nothing outstanding remains anywhere.
+    assert listener.discarded == ["428913"]
+
+
+async def test_device_pair_cancel_discards_the_listener_record(monkeypatch):
+    monkeypatch.setattr(matrix_commands, "_gen_device_pair_code", lambda: "428913")
+    monkeypatch.setattr(matrix_commands, "_gen_pair_id", lambda: "p_7af3c1")
+    s = FakeSession()
+    listener = FakeListener()
+    handler = CommandHandler(s, registrar=FakeRegistrar(), listener=listener)
+
+    await handler.handle("!control:hs", "device.pair_start", {}, sender="@sender:hs")
+    await handler.handle("!control:hs", "device.pair_cancel", {"pair_id": "p_7af3c1"})
+
+    # Cancel itself discards (the watcher task may be cancelled before its
+    # body ever ran, so its finally-release is not guaranteed — discard is).
+    assert listener.discarded == ["428913"]
