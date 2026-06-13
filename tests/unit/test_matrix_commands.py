@@ -54,11 +54,11 @@ class FakeCrypto:
 
 
 class FakeSession:
-    def __init__(self, plugin_id="plugin-00000000-0000-0000-0000-000000000000"):
+    def __init__(self, access_token="bot-tok"):  # noqa: S107  # test fixture
         self.rooms = FakeRooms()
         self.crypto = FakeCrypto()
         self.members = ["@u:hs"]
-        self.plugin_id = plugin_id
+        self.access_token = access_token
 
     def recipients(self, room_id):
         return list(self.members)
@@ -79,27 +79,28 @@ class FakeRegistrar:
         self.status_calls: list = []
         self.statuses = list(statuses or [])
         self.register_error = register_error
+        self.bot_token = None
+
+    def set_bot_token(self, token):
+        self.bot_token = token
 
     async def plugin_version(self, app_id, *, client_id=None):
         self.calls.append((app_id, client_id))
         return PluginVersion(current_version=self.version, source=self.source)
 
-    async def register(
+    async def create_code(
         self,
         code,
         *,
-        kind="user",
-        plugin_id=None,
-        user_id=None,
         ttl_seconds=None,
+        reusable=False,
     ):
         self.register_calls.append(
             {
                 "code": code,
-                "kind": kind,
-                "plugin_id": plugin_id,
-                "user_id": user_id,
                 "ttl_seconds": ttl_seconds,
+                "reusable": reusable,
+                "bot_token": self.bot_token,
             }
         )
         if self.register_error is not None:
@@ -208,7 +209,7 @@ async def test_update_check_reports_invalid_install_source_as_blocker():
     assert content["blockers"] == ["registrar source is not an http(s) install script URL"]
 
 
-async def test_device_pair_start_registers_sender_bound_code_and_replies(monkeypatch):
+async def test_device_pair_start_mints_implicitly_bound_code_and_replies(monkeypatch):
     monkeypatch.setattr(matrix_commands, "_gen_device_pair_code", lambda: "428913")
     monkeypatch.setattr(matrix_commands, "_gen_pair_id", lambda: "p_7af3c1")
     s = FakeSession()
@@ -222,13 +223,15 @@ async def test_device_pair_start_registers_sender_bound_code_and_replies(monkeyp
         sender="@sender:hs",
     )
 
+    # C.3.1 / E: POST /codes takes no user_id and no plugin_id — the bound user
+    # is implied by the bot token (the only user the plugin has). The code is
+    # short-lived single-use; bot-token auth is bound from the session.
     assert reg.register_calls == [
         {
             "code": "428913",
-            "kind": "user",
-            "plugin_id": s.plugin_id,
-            "user_id": "@sender:hs",
             "ttl_seconds": 120,
+            "reusable": False,
+            "bot_token": "bot-tok",
         }
     ]
     room, content, push = s.crypto.sent[-1]

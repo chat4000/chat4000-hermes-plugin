@@ -1,7 +1,7 @@
 """Plugin setup (protocol C.6) — one user per plugin, idempotent across re-runs.
 
 Fakes the registrar and the short-lived room session; asserts the C.6 order
-(onboard → /user/ensure → rooms + invites), idempotency (re-running setup never
+(birth bot → PUT /user → rooms + invites), idempotency (re-running setup never
 creates a second user / duplicate rooms / failing invites), and the
 single-crypto-owner rule (the setup path never touches the OlmMachine — the
 fake session has no crypto surface at all, so any crypto call would explode).
@@ -14,28 +14,34 @@ from contextlib import asynccontextmanager
 import pytest
 
 from chat4000_hermes_plugin import setup_flow
-from chat4000_hermes_plugin.matrix.creds_store import BotCreds, save_bot_creds
-from chat4000_hermes_plugin.matrix.registrar_client import RedeemResult, UserEnsureResult
+from chat4000_hermes_plugin.matrix.registrar_client import PluginBirth, UserEnsureResult
 from chat4000_hermes_plugin.matrix.users_store import load_known_users
 
-PLUGIN_ID = "11111111-2222-3333-4444-555555555555"
 ENSURED_USER = "@u_one:hs"
+BOT_TOKEN = "tok"  # noqa: S105  # test fixture, not a secret
 
 
 class FakeRegistrar:
-    """user_ensure is idempotent per plugin_id — created only on the first call."""
+    """user_ensure is idempotent (user DERIVED from the bot, C.2) — created only
+    on the first call; the bot token is bound by self_onboard / set_bot_token."""
 
     def __init__(self):
-        self.user_ensure_calls: list[str] = []
+        self.user_ensure_calls = 0
         self.onboard_calls = 0
+        self.bot_token = None
 
-    async def self_onboard(self, code, device_name="hermes-plugin"):
+    def set_bot_token(self, token):
+        self.bot_token = token
+
+    async def self_onboard(self, device_name="hermes-plugin"):
         self.onboard_calls += 1
-        return RedeemResult("wss://gw/ws", "@plugin_x:hs", "DEV", "tok", PLUGIN_ID)
+        self.bot_token = BOT_TOKEN
+        return PluginBirth("@plugin_x:hs", BOT_TOKEN, "DEV", "wss://gw/ws")
 
-    async def user_ensure(self, plugin_id):
-        self.user_ensure_calls.append(plugin_id)
-        return UserEnsureResult(user_id=ENSURED_USER, created=len(self.user_ensure_calls) == 1)
+    async def user_ensure(self):
+        assert self.bot_token == BOT_TOKEN  # C.4: bot-token auth bound first
+        self.user_ensure_calls += 1
+        return UserEnsureResult(user_id=ENSURED_USER, created=self.user_ensure_calls == 1)
 
 
 class FakeRooms:
@@ -92,7 +98,7 @@ async def test_setup_first_run_creates_everything_in_order(rooms):
     outcome = await setup_flow.ensure_setup("default", registrar=reg)
     assert outcome is not None
     assert reg.onboard_calls == 1
-    assert reg.user_ensure_calls == [PLUGIN_ID]
+    assert reg.user_ensure_calls == 1
     assert outcome.user_id == ENSURED_USER
     assert outcome.user_created is True
     assert outcome.space_id == "!space:hs"
@@ -111,8 +117,8 @@ async def test_setup_is_idempotent_across_reruns(rooms):
     assert first is not None and second is not None
     # Same bot identity (creds reused — onboarded exactly once)…
     assert reg.onboard_calls == 1
-    # …same ONE user (idempotent /user/ensure, created=False on the repeat)…
-    assert reg.user_ensure_calls == [PLUGIN_ID, PLUGIN_ID]
+    # …same ONE user (idempotent PUT /user, created=False on the repeat)…
+    assert reg.user_ensure_calls == 2
     assert second.user_id == ENSURED_USER
     assert second.user_created is False
     # …and no duplicate rooms: the re-run discovers, it does not recreate.
@@ -125,29 +131,13 @@ async def test_setup_is_idempotent_across_reruns(rooms):
     assert load_known_users("default") == [ENSURED_USER]
 
 
-async def test_setup_requires_plugin_id_for_user_ensure(rooms):
-    # Pre-redesign creds without plugin_id cannot run /user/ensure (C.6.1).
-    save_bot_creds(
-        BotCreds(
-            user_id="@plugin_x:hs",
-            device_id="DEV",
-            access_token="tok",  # noqa: S106  # test fixture, not a secret
-            gateway_url="wss://gw/ws",
-            plugin_id=None,
-        ),
-        "default",
-    )
-    with pytest.raises(RuntimeError, match="plugin_id"):
-        await setup_flow.ensure_setup("default", registrar=FakeRegistrar())
-
-
 async def test_setup_surfaces_registrar_failure(rooms):
     """A dead registrar during self-onboard surfaces as the RegistrarError the
     CLI's error boundary classifies — setup neither swallows nor half-runs."""
     from chat4000_hermes_plugin.matrix.registrar_client import RegistrarError
 
     class DownReg(FakeRegistrar):
-        async def self_onboard(self, code, device_name="hermes-plugin"):
+        async def self_onboard(self, device_name="hermes-plugin"):
             raise RegistrarError(503, "M_HOMESERVER_UNAVAILABLE", "down")
 
     with pytest.raises(RegistrarError):

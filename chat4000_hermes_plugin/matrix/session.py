@@ -131,8 +131,10 @@ class MatrixSession:
         return list(self._members)
 
     @property
-    def plugin_id(self) -> str | None:
-        return self._creds.plugin_id
+    def access_token(self) -> str:
+        """The bot's durable access token — the proof for the registrar's
+        bot-token endpoints (PUT /user, POST /codes, GET /codes — C.4)."""
+        return self._creds.access_token
 
     async def invite_user(self, user_id: str) -> None:
         """Invite a paired user into the space + control room (their entry point;

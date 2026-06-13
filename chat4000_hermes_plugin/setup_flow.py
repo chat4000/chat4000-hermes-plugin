@@ -4,9 +4,10 @@ Setup creates everything the plugin's ONE user will ever need — account, rooms
 invites — BEFORE any device pairs, so pairing afterwards is purely a device
 operation. In order (C.6):
 
-  1. self-onboard the bot account (register + redeem a kind=plugin code)
-  2. `POST /user/ensure` — create (or return) the plugin's one user, keyed by
-     `plugin_id`; idempotent, never a second account
+  1. birth the bot account (`POST /plugins`, C.1) — the bot MXID is the identity
+  2. `PUT /user` (C.2) with the BOT token — create (or return) the plugin's one
+     user, whose localpart is DERIVED from the bot MXID; idempotent and
+     wipe-proof, never a second account (no `plugin_id`)
   3. open a SHORT-LIVED bot Matrix session and create the workspace space +
      control room (both with `m.room.encryption` at creation; control marked
      `chat4000.room_kind: control`), then invite the user to both
@@ -76,19 +77,16 @@ async def ensure_setup(
     reg = registrar or build_registrar_client()
 
     # Step 1 — bot identity (existing creds are reused; never re-onboards).
+    # `ensure_onboarded` binds the bot token onto `reg` for the bot-token calls.
     creds = await ensure_onboarded(account, registrar=reg)
     if creds is None:
         return None
-    if not creds.plugin_id:
-        # Pre-redesign creds minted before the registrar returned plugin_id:
-        # /user/ensure and code binding (C.1) are impossible without it.
-        raise RuntimeError(
-            "bot creds have no plugin_id — run `chat4000 reset` and set up again "
-            "(the registrar needs plugin_id for /user/ensure, protocol C.6)"
-        )
 
-    # Step 2 — the plugin's one user (idempotent per plugin_id).
-    ensured = await reg.user_ensure(creds.plugin_id)
+    # Step 2 — the plugin's one user (C.2). The user localpart is DERIVED from
+    # the bot MXID by the registrar (bot-token auth), so this is idempotent and
+    # wipe-proof — no `plugin_id`, no stored binding.
+    reg.set_bot_token(creds.access_token)
+    ensured = await reg.user_ensure()
     add_known_user(ensured.user_id, account)
     logger.info(
         "chat4000 setup: plugin user %s (%s)",

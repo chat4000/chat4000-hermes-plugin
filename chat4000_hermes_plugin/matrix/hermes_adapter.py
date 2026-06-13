@@ -151,9 +151,13 @@ class Chat4000MatrixAdapter:
         )
         from ..registrar_config import build_registrar_client
 
+        # The resident listener polls GET /codes/{code} (C.3.3) which is
+        # bot-token auth (C.4) — bind the bot's durable token from creds.
+        listener_registrar = build_registrar_client()
+        listener_registrar.set_bot_token(creds.access_token)
         pair_listener = CompletionListener(
             account_id=self._account_id,
-            registrar=build_registrar_client(),
+            registrar=listener_registrar,
             on_redeem=self._on_pair_redeem,
             on_transition=self._on_pair_transition,
         )

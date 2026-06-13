@@ -1,7 +1,7 @@
 """Pairing-completion listener (protocol C.4 "Completion listening").
 
 The gateway-resident plugin owns pairing completion: this listener polls
-`/pair/status` for EVERY outstanding code in the pending-codes store — single-use
+`GET /codes/{code}` for EVERY outstanding code in the pending-codes store — single-use
 and reusable, CLI/installer-registered and `device.pair_start` ones — for each
 code's whole lifetime, surviving restarts (the store is the durable state; the
 listener re-reads it every scan, so codes registered by a separate CLI process
@@ -58,9 +58,9 @@ SCAN_INTERVAL_S = 1.5
 TRANSITION_COMPLETED = "completed"
 TRANSITION_EXPIRED = "expired"
 
-# (record, full /pair/status payload, one redeems[] entry) — fired once per NEW redeem.
+# (record, full GET /codes/{code} payload, one redeems[] entry) — fired once per NEW redeem.
 RedeemCb = Callable[[PendingCode, dict[str, Any], dict[str, Any]], Awaitable[None]]
-# (record, "completed" | "expired", full /pair/status payload) — fired when a code settles.
+# (record, "completed" | "expired", full GET /codes/{code} payload) — fired when a code settles.
 TransitionCb = Callable[[PendingCode, str, dict[str, Any]], Awaitable[None]]
 
 

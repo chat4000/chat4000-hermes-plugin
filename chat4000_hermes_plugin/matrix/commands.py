@@ -58,17 +58,17 @@ class RegistrarCommandClient(Protocol):
         self, app_id: str, *, client_id: str | None = None
     ) -> PluginVersion: ...
 
-    async def register(
+    async def create_code(
         self,
         code: str,
         *,
-        kind: str = "user",
-        plugin_id: str | None = None,
-        user_id: str | None = None,
         ttl_seconds: int | None = None,
+        reusable: bool = False,
     ) -> dict[str, Any]: ...
 
     async def status(self, code: str) -> dict[str, Any]: ...
+
+    def set_bot_token(self, token: str | None) -> None: ...
 
 
 class PairWatchCoordinator(Protocol):
@@ -230,19 +230,18 @@ class CommandHandler:
         if not sender:
             await self._fail_pair_start(pair_id, "event sender missing")
             return
-        plugin_id = getattr(self._s, "plugin_id", None)
-        if not plugin_id:
-            await self._fail_pair_start(pair_id, "plugin_id missing")
-            return
 
+        # The code binds to the plugin's one DERIVED user implicitly (C.3.1):
+        # POST /codes takes no `user_id` and no `plugin_id` — the bot token alone
+        # selects the only user the plugin has. Authorization is control-room
+        # membership (E "Only control-room members may enroll"), enforced by the
+        # caller routing this only from the control room; there is no
+        # sender-to-user binding to echo (protocol B).
         code = _gen_device_pair_code()
         registrar = self._registrar_client()
         try:
-            reg_resp = await registrar.register(
+            reg_resp = await registrar.create_code(
                 code,
-                kind="user",
-                plugin_id=plugin_id,
-                user_id=sender,
                 ttl_seconds=DEVICE_PAIR_TTL_SECONDS,
             )
         except RegistrarError as exc:
@@ -481,11 +480,19 @@ class CommandHandler:
         return UpdateTarget(version=result.current_version, source=result.source)
 
     def _registrar_client(self) -> RegistrarCommandClient:
+        client: RegistrarCommandClient
         if self._registrar is not None:
-            return self._registrar
-        from ..registrar_config import build_registrar_client
+            client = self._registrar
+        else:
+            from ..registrar_config import build_registrar_client
 
-        return build_registrar_client()
+            client = build_registrar_client()
+        # Bind the bot token so POST /codes + GET /codes authenticate as the bot
+        # (C.4); plugin_version still uses the service token configured on it.
+        bot_token = getattr(self._s, "access_token", None)
+        if bot_token:
+            client.set_bot_token(bot_token)
+        return client
 
     def _update_blockers(self, target: UpdateTarget) -> list[str]:
         blockers: list[str] = []

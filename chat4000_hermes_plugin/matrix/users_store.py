@@ -1,6 +1,6 @@
 """Known-users store — the plugin's user MXID(s), durably recorded.
 
-One plugin = exactly ONE human user (protocol B): the account `/user/ensure`
+One plugin = exactly ONE human user (protocol B): the account `PUT /user` (C.2)
 creates at setup, recorded here by `setup_flow.ensure_setup` (and, redundantly
 but idempotently, when a pairing completes — every code is bound to that same
 user, so re-adding is a no-op). Pairing never creates users; it only adds

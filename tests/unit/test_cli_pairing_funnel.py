@@ -23,7 +23,7 @@ import chat4000_hermes_plugin.analytics as analytics_mod
 import chat4000_hermes_plugin.cli as cli
 import chat4000_hermes_plugin.setup_flow as setup_flow
 from chat4000_hermes_plugin.matrix.registrar_client import (
-    RedeemResult,
+    PluginBirth,
     RegistrarError,
     UserEnsureResult,
     VersionVerdict,
@@ -76,20 +76,25 @@ class _OkReg:
     def __init__(self):
         self.version_calls: list = []
         self.register_calls: list = []
-        self.user_ensure_calls: list = []
+        self.user_ensure_calls = 0
+        self.bot_token = None
+
+    def set_bot_token(self, token):
+        self.bot_token = token
 
     async def version(self, *a, **k):
         self.version_calls.append((a, k))
         return VersionVerdict("ok", None, 1, None)
 
-    async def self_onboard(self, code, device_name="x"):
-        return RedeemResult("wss://gw/ws", "@plugin:hs", "DEV", "tok", "plug-id")
+    async def self_onboard(self, device_name="x"):
+        self.bot_token = "tok"  # noqa: S105  # test fixture, not a secret
+        return PluginBirth("@plugin:hs", "tok", "DEV", "wss://gw/ws")
 
-    async def user_ensure(self, plugin_id):
-        self.user_ensure_calls.append(plugin_id)
-        return UserEnsureResult(user_id=ENSURED_USER, created=len(self.user_ensure_calls) == 1)
+    async def user_ensure(self):
+        self.user_ensure_calls += 1
+        return UserEnsureResult(user_id=ENSURED_USER, created=self.user_ensure_calls == 1)
 
-    async def register(self, code, **k):
+    async def create_code(self, code, **k):
         self.register_calls.append((code, k))
         return {"ok": True, "expires_at": 1234567890123}
 
@@ -112,10 +117,13 @@ class _ExpiredReg(_OkReg):
 
 
 class _Down502Reg:
+    def set_bot_token(self, token):
+        pass
+
     async def version(self, *a, **k):
         raise RegistrarError(502, "M_HOMESERVER_UNAVAILABLE", "registrar down")
 
-    async def self_onboard(self, code, device_name="x"):
+    async def self_onboard(self, device_name="x"):
         raise RegistrarError(502, "M_HOMESERVER_UNAVAILABLE", "registrar down")
 
 
@@ -206,9 +214,10 @@ async def test_expired_emits_no_plugin_events(monkeypatch, fake_room_session):
     assert events == []
 
 
-async def test_pair_registers_bound_code_with_default_flags(monkeypatch, fake_room_session):
-    """C.1: the code rides with plugin_id (the registrar binds it to the plugin's
-    one user); the default case sends NO ttl/reusable overrides."""
+async def test_pair_mints_bound_code_with_default_flags(monkeypatch, fake_room_session):
+    """C.3.1: the code is minted via POST /codes — bound implicitly to the
+    plugin's one DERIVED user by the bot token (no kind/plugin_id/user_id); the
+    default case sends NO ttl/reusable overrides."""
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
     reg = _OkReg()
     monkeypatch.setattr(cli, "_registrar", lambda: reg)
@@ -217,8 +226,9 @@ async def test_pair_registers_bound_code_with_default_flags(monkeypatch, fake_ro
     assert len(reg.register_calls) == 1
     code, kwargs = reg.register_calls[0]
     assert len(code) == 6 and code.isdigit()
-    assert kwargs["kind"] == "user"
-    assert kwargs["plugin_id"] == "plug-id"
+    assert "kind" not in kwargs
+    assert "plugin_id" not in kwargs
+    assert "user_id" not in kwargs
     assert kwargs["ttl_seconds"] is None
     assert kwargs["reusable"] is False
 
@@ -287,7 +297,7 @@ async def test_setup_runs_user_ensure_and_invites_before_the_code(monkeypatch, f
     monkeypatch.setattr(cli, "_registrar", lambda: reg)
     _capture(monkeypatch)
     await cli._run_pair("default")
-    assert reg.user_ensure_calls == ["plug-id"]
+    assert reg.user_ensure_calls == 1
     assert fake_room_session.created == ["space", "control"]
     assert fake_room_session.invited == [
         ("!space:hs", ENSURED_USER),

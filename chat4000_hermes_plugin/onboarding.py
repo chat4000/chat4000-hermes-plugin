@@ -1,9 +1,11 @@
 """Self-onboard the plugin's Matrix bot identity (mint + persist bot creds).
 
-The bot identity is independent of any user pairing: the plugin registers itself
-with the registrar (kind=plugin) and gets a durable Matrix login. This runs at
-gateway startup (gateway-first install) so the gateway can connect and bootstrap
-its rooms BEFORE anyone pairs — and is reused by `chat4000 pair` / `prepare`.
+The bot identity is independent of any user pairing: the plugin births itself
+with the registrar (`POST /plugins`, C.1) and gets a durable Matrix login. This
+runs at gateway startup (gateway-first install) so the gateway can connect and
+bootstrap its rooms BEFORE anyone pairs — and is reused by
+`chat4000 pair` / `prepare`. The bot MXID IS the plugin identity (protocol B);
+there is no `plugin_id`.
 """
 
 from __future__ import annotations
@@ -29,19 +31,22 @@ async def ensure_onboarded(
     `chat4000 pair` does."""
     creds = load_bot_creds(account)
     if creds is not None:
+        # Bind the stored bot token onto the client for the bot-token endpoints
+        # (PUT /user, POST /codes, GET /codes — C.4), in case this client built
+        # itself without it.
+        if registrar is not None:
+            registrar.set_bot_token(creds.access_token)
         return creds
 
-    from .cli import _gen_code
     from .registrar_config import build_registrar_client
 
     reg = registrar or build_registrar_client()
-    redeemed = await reg.self_onboard(_gen_code(), device_name="hermes-plugin")
+    birth = await reg.self_onboard(device_name="hermes-plugin")
     creds = BotCreds(
-        user_id=redeemed.user_id,
-        device_id=redeemed.device_id,
-        access_token=redeemed.access_token,
-        gateway_url=redeemed.gateway_url,
-        plugin_id=redeemed.plugin_id,
+        user_id=birth.bot_user_id,
+        device_id=birth.device_id,
+        access_token=birth.bot_access_token,
+        gateway_url=birth.gateway_url,
     )
     save_bot_creds(creds, account)
     logger.info("chat4000: self-onboarded bot identity %s", creds.user_id)

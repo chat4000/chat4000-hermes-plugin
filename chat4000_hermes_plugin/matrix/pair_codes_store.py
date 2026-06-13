@@ -1,7 +1,7 @@
 """Outstanding pairing-codes store — the completion listener's persistent state.
 
 Protocol C.4 "Completion listening": the gateway-resident plugin owns pairing
-completion and must poll `/pair/status` for EVERY outstanding code it has
+completion and must poll `GET /codes/{code}` for EVERY outstanding code it has
 registered — including reusable ones — for the code's whole lifetime, SURVIVING
 its own restarts. This store is that durable state: every registered code
 (`chat4000 pair`, the installer, `device.pair_start`) is recorded here and the

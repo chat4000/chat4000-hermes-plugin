@@ -3,7 +3,7 @@
 Pairing is now a 6-digit OTP via the registrar (protocol C), not the v1 relay
 handshake:
 
-  pair   — run setup (C.6: self-onboard, /user/ensure, space + control room +
+  pair   — run setup (C.6: POST /plugins, PUT /user, space + control room +
            invites) on first run, then register a 6-digit user code BOUND to the
            plugin's one user, show it (+ QR), and poll for immediate feedback.
            The gateway-resident completion listener is the system of record for
@@ -146,7 +146,7 @@ def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (unty
     def cmd_prepare(account: str, stage: bool) -> None:
         """Plugin setup (protocol C.6): persist the env, enable the plugin in the
         Hermes config, self-onboard the bot identity, ensure the plugin's one
-        user (/user/ensure), and create the space + control room + invites via a
+        user (PUT /user), and create the space + control room + invites via a
         short-lived bot session — all BEFORE any device pairs. Idempotent.
         Fails fast if the registrar is unreachable."""
         if stage:
@@ -179,7 +179,6 @@ def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (unty
                     f"bot user:    {creds.user_id}",
                     f"device:      {creds.device_id}",
                     f"gateway:     {creds.gateway_url}",
-                    f"plugin_id:   {creds.plugin_id or '(none)'}",
                     f"paired users: {len(users)}" + (": " + ", ".join(users) if users else ""),
                     "configured:  yes",
                 ]
@@ -317,7 +316,7 @@ async def _run_pair(
         click.echo(f"(version check skipped: {exc})")
 
     # Plugin setup (C.6, idempotent): bot identity, the plugin's one user
-    # (/user/ensure), and the space + control room + invites — all before any
+    # (PUT /user), and the space + control room + invites — all before any
     # device pairs, so pairing below is purely a device operation.
     from . import setup_flow
 
@@ -325,15 +324,13 @@ async def _run_pair(
     if outcome is None:
         click.echo("Could not onboard the plugin identity (registrar unreachable?).", err=True)
         return
-    creds = outcome.creds
 
-    # Register a user pairing code — bound at registration to the plugin's one
-    # user via plugin_id (C.1); the registrar does the binding.
+    # Mint a pairing code — bound implicitly to the plugin's one DERIVED user
+    # (C.3.1); the bot token alone selects it (no kind, no plugin_id, no
+    # user_id). `ensure_setup` bound the bot token onto `reg`.
     code = _gen_code()
-    register_resp = await reg.register(
+    register_resp = await reg.create_code(
         code,
-        kind="user",
-        plugin_id=creds.plugin_id,
         ttl_seconds=ttl_seconds,
         reusable=reusable,
     )

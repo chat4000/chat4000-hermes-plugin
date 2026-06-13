@@ -20,6 +20,8 @@ import pytest
 import chat4000_hermes_plugin.matrix.registrar_client as rc
 from chat4000_hermes_plugin.matrix.registrar_client import RegistrarClient, RegistrarError
 
+BOT_TOK = "bot-tok"  # noqa: S105  # test fixture, not a secret
+
 
 class _FakeClock:
     def __init__(self):
@@ -54,9 +56,11 @@ def _scripted_client(monkeypatch, outcomes):
     client = RegistrarClient("https://registrar.example", "svc-token")
     calls = {"n": 0}
 
+    client.set_bot_token("bot-token")
+
     async def fake_get(path, *, auth):
-        assert path.startswith("/pair/status?code=")
-        assert auth is True
+        assert path.startswith("/codes/")
+        assert auth == "bot-token"
         out = outcomes[min(calls["n"], len(outcomes) - 1)]
         calls["n"] += 1
         if isinstance(out, Exception):
@@ -166,45 +170,68 @@ async def test_poll_returns_when_a_reusable_code_has_redeems(clock, monkeypatch)
     assert calls["n"] == 2
 
 
-async def test_user_ensure_posts_plugin_id_and_parses_result(monkeypatch):
-    """C.6.1 — /user/ensure request/response shape."""
+async def test_self_onboard_posts_plugins_and_binds_bot_token(monkeypatch):
+    """C.1 — POST /plugins (service-token) births the bot and binds its token."""
     client = RegistrarClient("https://registrar.example", "svc-token")
     seen = {}
 
     async def fake_post(path, body, *, auth, client_id=None):
         seen.update({"path": path, "body": body, "auth": auth})
-        return {"user_id": "@u_one:hs", "created": True}
+        return {
+            "bot_user_id": "@plugin_x:hs",
+            "bot_access_token": BOT_TOK,
+            "device_id": "DEV",
+            "gateway_url": "wss://gw/ws",
+        }
 
     monkeypatch.setattr(client, "_post", fake_post)
-    result = await client.user_ensure("11111111-2222-3333-4444-555555555555")
-    assert seen == {
-        "path": "/user/ensure",
-        "body": {"plugin_id": "11111111-2222-3333-4444-555555555555"},
-        "auth": True,
-    }
+    birth = await client.self_onboard()
+    assert seen == {"path": "/plugins", "body": {}, "auth": "svc-token"}
+    assert birth.bot_user_id == "@plugin_x:hs"
+    assert birth.bot_access_token == BOT_TOK
+    assert birth.device_id == "DEV"
+    assert birth.gateway_url == "wss://gw/ws"
+    # The bot token is bound for subsequent PUT /user, POST /codes calls (C.4).
+    assert client.bot_token == BOT_TOK
+
+
+async def test_user_ensure_puts_empty_body_with_bot_token(monkeypatch):
+    """C.2 — PUT /user is empty-body, bot-token auth; user is derived."""
+    client = RegistrarClient("https://registrar.example", "svc-token", bot_token=BOT_TOK)
+    seen = {}
+
+    async def fake_put(path, body, *, auth, client_id=None):
+        seen.update({"path": path, "body": body, "auth": auth})
+        return {"user_id": "@u_one:hs", "created": True}
+
+    monkeypatch.setattr(client, "_put", fake_put)
+    result = await client.user_ensure()
+    assert seen == {"path": "/user", "body": {}, "auth": BOT_TOK}
     assert result.user_id == "@u_one:hs"
     assert result.created is True
 
 
-async def test_register_sends_reusable_and_ttl_only_when_set(monkeypatch):
-    """C.1 wire shape: ttl_seconds/reusable ride only when the caller asked —
-    the default register body is unchanged by the redesign."""
+async def test_user_ensure_without_bot_token_is_401(monkeypatch):
+    """C.4 — a bot-token endpoint with no bot token fails before any request."""
     client = RegistrarClient("https://registrar.example", "svc-token")
+    with pytest.raises(RegistrarError) as ei:
+        await client.user_ensure()
+    assert ei.value.status == 401
+
+
+async def test_create_code_sends_reusable_and_ttl_only_when_set(monkeypatch):
+    """C.3.1 — POST /codes is bot-token auth; no kind/plugin_id/user_id;
+    ttl_seconds/reusable ride only when the caller asked."""
+    client = RegistrarClient("https://registrar.example", "svc-token", bot_token=BOT_TOK)
     bodies = []
 
     async def fake_post(path, body, *, auth, client_id=None):
-        assert path == "/pair/register" and auth is True
+        assert path == "/codes" and auth == BOT_TOK
         bodies.append(body)
         return {"ok": True, "expires_at": 1}
 
     monkeypatch.setattr(client, "_post", fake_post)
-    await client.register("123456", kind="user", plugin_id="p" * 36)
-    await client.register("654321", kind="user", plugin_id="p" * 36, ttl_seconds=600, reusable=True)
-    assert bodies[0] == {"code": "123456", "kind": "user", "plugin_id": "p" * 36}
-    assert bodies[1] == {
-        "code": "654321",
-        "kind": "user",
-        "plugin_id": "p" * 36,
-        "ttl_seconds": 600,
-        "reusable": True,
-    }
+    await client.create_code("123456")
+    await client.create_code("654321", ttl_seconds=600, reusable=True)
+    assert bodies[0] == {"code": "123456"}
+    assert bodies[1] == {"code": "654321", "ttl_seconds": 600, "reusable": True}

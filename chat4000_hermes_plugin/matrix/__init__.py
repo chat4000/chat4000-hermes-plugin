@@ -14,7 +14,7 @@ from .creds_store import BotCreds, crypto_store_path, load_bot_creds, save_bot_c
 from .crypto_driver import CryptoDriver, load_olm_machine
 from .gateway_client import AuthError, GatewayClient, GatewayCredentials
 from .registrar_client import (
-    RedeemResult,
+    PluginBirth,
     RegistrarClient,
     RegistrarError,
     VersionVerdict,
@@ -31,7 +31,7 @@ __all__ = [
     "AuthError",
     # registrar
     "RegistrarClient",
-    "RedeemResult",
+    "PluginBirth",
     "RegistrarError",
     "VersionVerdict",
     # crypto + sync

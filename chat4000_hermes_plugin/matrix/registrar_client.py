@@ -4,18 +4,28 @@ Plain HTTPS, no crypto, stdlib only (urllib in a thread → async). This is the
 one place the plugin talks to the registrar; everything else goes over the
 gateway socket.
 
-Three jobs:
-  - self-onboard: register + redeem a `kind=plugin` code → the plugin's own
-    `@plugin_…` MXID, durable bot `access_token`, `gateway_url`, `plugin_id`.
-  - pair a user: register a `kind=user` code (bound to our `plugin_id`), show it,
-    poll `/pair/status` until `completed`, return the user's MXID to invite.
-  - version gate: `/version` on boot + before pairing; `force_upgrade` → refuse.
+Two distinct credentials (C.4 "Auth & trust"):
+  - the **service token** (`REGISTRAR_SERVICE_TOKEN`, shared) gates ONLY
+    `POST /plugins` (C.1, birth a bot) and `POST /plugin-version` (C.5.2);
+  - the **bot access token** (per-plugin, from `POST /plugins`) gates
+    `PUT /user` (C.2), `POST /codes` (C.3.1), and `GET /codes/{code}` (C.3.3) —
+    the registrar whoami-verifies it on every such call.
 
-⚠️ Pushback X2: `/pair/register` and `/pair/status` require a shared
-`REGISTRAR_SERVICE_TOKEN`. This plugin runs on user machines — a shared secret
-there is unprotectable, and `plugin_id` is self-asserted (not validated), so the
-per-plugin code limit is fiction. Needs per-plugin tokens. We read the token
-from config/env for now and document the risk.
+Jobs:
+  - self-onboard: `POST /plugins` (C.1) births the plugin bot → its own
+    `@plugin_…` MXID, durable bot `access_token`, `device_id`, `gateway_url`.
+    There is NO `plugin_id`: the bot MXID is the identity.
+  - create the user: `PUT /user` (C.2), bot-token auth, empty body — the user
+    localpart is DERIVED from the bot MXID, so it is idempotent and wipe-proof.
+  - pair a device: mint a code `POST /codes` (C.3.1, bot-token), show it, poll
+    `GET /codes/{code}` (C.3.3, bot-token) until someone redeems.
+  - version gate: `/version` (public) on boot + before pairing; `force_upgrade`
+    → refuse.
+
+⚠️ Pushback X2: the shared `REGISTRAR_SERVICE_TOKEN` (now only `POST /plugins`)
+ships in a client running on user machines — treat it as public; a leak lets
+someone mint inert orphan bots and nothing else (C.1). The privileged
+operations (user, codes) are gated by the per-plugin bot token instead.
 """
 
 from __future__ import annotations
@@ -46,17 +56,20 @@ _STATUS_RETRY_BUDGET_S = 90.0
 
 
 @dataclass
-class RedeemResult:
-    gateway_url: str
-    user_id: str
+class PluginBirth:
+    """C.1 `POST /plugins` — a freshly minted plugin bot identity. The bot MXID
+    IS the plugin identity; there is no `plugin_id`."""
+
+    bot_user_id: str
+    bot_access_token: str
     device_id: str
-    access_token: str
-    plugin_id: str | None = None  # only for kind=plugin
+    gateway_url: str
 
 
 @dataclass
 class UserEnsureResult:
-    """C.6.1 — the plugin's one user (`created` is False on an idempotent repeat)."""
+    """C.2 `PUT /user` — the plugin's one DERIVED user (`created` is False on an
+    idempotent repeat)."""
 
     user_id: str
     created: bool
@@ -90,12 +103,12 @@ class RegistrarError(RuntimeError):
 
 
 def pair_redeem_index(status: dict[str, Any], device_id: object) -> int | None:
-    """PL4 `redeem_index` derivation (registry-documented): `/pair/status`
-    carries no per-entry index, so derive it from the wire fields —
+    """PL4 `redeem_index` derivation (registry-documented): `GET /codes/{code}`
+    (C.3.3) carries no per-entry index, so derive it from the wire fields —
     `redeemed_count − len(redeems) + position(entry) + 1`, with
-    `redeemed_count` falling back to `len(redeems)` when absent/0. The
-    old-registrar completed shape (no `redeems[]`) counts as the single first
-    redeem → 1. None when the entry can't be located (never fabricate)."""
+    `redeemed_count` falling back to `len(redeems)` when absent/0. A `completed`
+    shape with no `redeems[]` counts as the single first redeem → 1. None when
+    the entry can't be located (never fabricate)."""
     redeems = [e for e in (status.get("redeems") or []) if isinstance(e, dict)]
     if not redeems:
         return 1 if status.get("status") == "completed" else None
@@ -108,87 +121,87 @@ def pair_redeem_index(status: dict[str, Any], device_id: object) -> int | None:
 
 class RegistrarClient:
     def __init__(
-        self, base_url: str, service_token: str | None = None, *, timeout: float = 15.0
+        self,
+        base_url: str,
+        service_token: str | None = None,
+        *,
+        bot_token: str | None = None,
+        timeout: float = 15.0,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._service_token = service_token
+        # The per-plugin bot access token (from POST /plugins). Gates PUT /user,
+        # POST /codes, GET /codes/{code} (C.4). Set after self-onboard, or passed
+        # in by a caller that already holds the bot creds.
+        self._bot_token = bot_token
         self._timeout = timeout
+
+    @property
+    def bot_token(self) -> str | None:
+        return self._bot_token
+
+    def set_bot_token(self, token: str | None) -> None:
+        """Bind the per-plugin bot token used for PUT /user, POST /codes, and
+        GET /codes/{code} (C.4). `self_onboard` sets it from the birth response;
+        callers that load stored creds set it directly."""
+        self._bot_token = token
 
     # ─── endpoints ────────────────────────────────────────────────────────
 
-    async def register(
+    async def create_code(
         self,
         code: str,
         *,
-        kind: str = "user",
-        plugin_id: str | None = None,
-        user_id: str | None = None,
         ttl_seconds: int | None = None,
         reusable: bool = False,
     ) -> dict[str, Any]:
-        """C.1 — reserve a pairing code. Bearer service token required.
+        """C.3.1 `POST /codes` — mint a pairing code. Bearer BOT token (C.4).
 
-        A `kind=user` code is bound AT REGISTRATION to the plugin's one user
-        (the account `/user/ensure` created for `plugin_id`); `user_id` is only
-        an integrity check, never a binding source. `reusable` codes can be
-        redeemed many times until expiry, each redeem adding another device."""
-        body: dict[str, Any] = {"code": code, "kind": kind}
-        if plugin_id is not None:
-            body["plugin_id"] = plugin_id
-        if user_id is not None:
-            body["user_id"] = user_id
+        The bound user is the bot's DERIVED user (C.2) — implied by the bot
+        token, never named: there is no `kind`, no `plugin_id`, no `user_id`.
+        `reusable` codes can be redeemed many times until expiry, each redeem
+        adding another device. Response `{ok, expires_at}`."""
+        body: dict[str, Any] = {"code": code}
         if ttl_seconds is not None:
             body["ttl_seconds"] = ttl_seconds
         if reusable:
             body["reusable"] = True
-        return await self._post("/pair/register", body, auth=True)
+        return await self._post("/codes", body, auth=self._bot_auth())
 
-    async def user_ensure(self, plugin_id: str) -> UserEnsureResult:
-        """C.6.1 — create (or return) the plugin's one user. Idempotent per
-        `plugin_id`: a repeat returns the same `user_id` with `created: false`."""
-        r = await self._post("/user/ensure", {"plugin_id": plugin_id}, auth=True)
+    async def user_ensure(self) -> UserEnsureResult:
+        """C.2 `PUT /user` — create (or return) the plugin's one user. Bearer
+        BOT token (empty body); the user localpart is DERIVED from the verified
+        bot MXID, so this is idempotent and wipe-proof — a repeat returns the
+        same `user_id` with `created: false`."""
+        r = await self._put("/user", {}, auth=self._bot_auth())
         return UserEnsureResult(user_id=str(r["user_id"]), created=bool(r.get("created", False)))
 
-    async def redeem(self, code: str, *, device_name: str | None = None) -> RedeemResult:
-        """C.2 — redeem a code (public). Used by the plugin to self-onboard a
-        `kind=plugin` code it just registered."""
-        body: dict[str, Any] = {"code": code}
-        if device_name is not None:
-            body["device_name"] = device_name
-        r = await self._post("/pair/redeem", body, auth=False)
-        return RedeemResult(
-            gateway_url=r["gateway_url"],
-            user_id=r["user_id"],
-            device_id=r["device_id"],
-            access_token=r["access_token"],
-            plugin_id=r.get("plugin_id"),
-        )
-
     async def status(self, code: str) -> dict[str, Any]:
-        """C.3 — poll pairing completion. Bearer service token required.
+        """C.3.3 `GET /codes/{code}` — poll pairing completion. Bearer BOT token.
 
         Transient registrar trouble (429 rate limit, 502/503/504, network
         errors) is retried in place with exponential backoff (~2 s doubling
         to 30 s, ≤ _STATUS_RETRY_BUDGET_S per call) — seen live: a single
-        /pair/status 429 (M_LIMIT_EXCEEDED) used to kill the pairing watcher
-        and lose the session. Non-transient errors still raise immediately."""
+        status 429 (M_LIMIT_EXCEEDED) used to kill the pairing watcher and
+        lose the session. Non-transient errors still raise immediately."""
         return await self._status_with_retry(code, budget_s=_STATUS_RETRY_BUDGET_S)
 
     async def _status_with_retry(self, code: str, *, budget_s: float) -> dict[str, Any]:
-        """One `/pair/status` call that absorbs transient errors for up to
+        """One `GET /codes/{code}` call that absorbs transient errors for up to
         `budget_s` seconds (backoff sleeps never overrun the budget; the
         first attempt is always made). On a still-failing registrar the last
         transient error is raised for the caller's deadline to judge."""
         give_up_at = time.monotonic() + budget_s
         backoff = _RETRY_INITIAL_BACKOFF_S
+        auth = self._bot_auth()
         while True:
             try:
-                return await self._get(f"/pair/status?code={code}", auth=True)
+                return await self._get(f"/codes/{code}", auth=auth)
             except RegistrarError as e:
                 if not e.is_transient or time.monotonic() + backoff > give_up_at:
                     raise
                 logger.warning(
-                    "transient registrar error on /pair/status (%s) — retrying in %.0f s",
+                    "transient registrar error on GET /codes (%s) — retrying in %.0f s",
                     e,
                     backoff,
                 )
@@ -212,7 +225,7 @@ class RegistrarClient:
             "release_channel": release_channel,
             "platform": platform,
         }
-        r = await self._post("/version", body, auth=False, client_id=client_id)
+        r = await self._post("/version", body, auth=None, client_id=client_id)
         return VersionVerdict(
             action=r.get("action", "ok"),
             recommended=r.get("recommended"),
@@ -221,24 +234,38 @@ class RegistrarClient:
         )
 
     async def plugin_version(self, app_id: str, *, client_id: str | None = None) -> PluginVersion:
-        """C.5.2 — ask which exact plugin build and install source to run.
-        `client_id` as the X-Client-Id header only (PL3); no posthog_id body."""
-        r = await self._post("/plugin-version", {"app_id": app_id}, auth=True, client_id=client_id)
+        """C.5.2 — ask which exact plugin build and install source to run. Bearer
+        SERVICE token. `client_id` as the X-Client-Id header only (PL3); no
+        posthog_id body."""
+        r = await self._post(
+            "/plugin-version", {"app_id": app_id}, auth=self._service_auth(), client_id=client_id
+        )
         return PluginVersion(current_version=str(r["current_version"]), source=str(r["source"]))
 
     # ─── high-level flows ─────────────────────────────────────────────────
 
-    async def self_onboard(self, code: str, *, device_name: str = "hermes-plugin") -> RedeemResult:
-        """Register + redeem a `kind=plugin` code to mint the plugin's bot
-        identity. `plugin_id` is omitted on register (the registrar issues it)."""
-        await self.register(code, kind="plugin")
-        return await self.redeem(code, device_name=device_name)
+    async def self_onboard(self, *, device_name: str = "hermes-plugin") -> PluginBirth:  # noqa: ARG002
+        """C.1 `POST /plugins` — birth the plugin bot. Bearer SERVICE token,
+        empty body. NOT idempotent: every call mints a fresh bot, so call it
+        exactly once at first self-onboard and persist what it returns. The
+        returned bot token is bound onto this client for the subsequent
+        bot-token calls (PUT /user, POST /codes). `device_name` is accepted for
+        call-site compatibility but unused — C.1 takes no body."""
+        r = await self._post("/plugins", {}, auth=self._service_auth())
+        birth = PluginBirth(
+            bot_user_id=str(r["bot_user_id"]),
+            bot_access_token=str(r["bot_access_token"]),
+            device_id=str(r["device_id"]),
+            gateway_url=str(r["gateway_url"]),
+        )
+        self.set_bot_token(birth.bot_access_token)
+        return birth
 
     async def poll_until_complete(
         self, code: str, *, interval: float = 1.5, deadline_s: float = 300.0
     ) -> dict[str, Any] | None:
-        """Poll `/pair/status` until someone paired, the code expired (→ None),
-        or the deadline (→ None).
+        """Poll `GET /codes/{code}` until someone paired, the code expired
+        (→ None), or the deadline (→ None).
 
         "Someone paired" (C.3) is `status == completed` OR `redeems` non-empty —
         a REUSABLE code never settles to `completed` however many redeems it
@@ -273,14 +300,37 @@ class RegistrarClient:
             await asyncio.sleep(interval)
         return None
 
+    # ─── auth selectors (C.4 "Auth & trust — two distinct credentials") ────
+
+    def _service_auth(self) -> str:
+        """The shared service token — gates POST /plugins and POST /plugin-version."""
+        if not self._service_token:
+            raise RegistrarError(401, "M_MISSING_TOKEN", "no service token configured")
+        return self._service_token
+
+    def _bot_auth(self) -> str:
+        """The per-plugin bot token — gates PUT /user, POST /codes, GET /codes."""
+        if not self._bot_token:
+            raise RegistrarError(
+                401,
+                "M_MISSING_TOKEN",
+                "no bot access token configured (self-onboard first, C.1)",
+            )
+        return self._bot_token
+
     # ─── transport ────────────────────────────────────────────────────────
 
     async def _post(
-        self, path: str, body: dict[str, Any], *, auth: bool, client_id: str | None = None
+        self, path: str, body: dict[str, Any], *, auth: str | None, client_id: str | None = None
     ) -> dict[str, Any]:
         return await asyncio.to_thread(self._request, "POST", path, body, auth, client_id)
 
-    async def _get(self, path: str, *, auth: bool) -> dict[str, Any]:
+    async def _put(
+        self, path: str, body: dict[str, Any], *, auth: str | None, client_id: str | None = None
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self._request, "PUT", path, body, auth, client_id)
+
+    async def _get(self, path: str, *, auth: str | None) -> dict[str, Any]:
         return await asyncio.to_thread(self._request, "GET", path, None, auth, None)
 
     def _request(
@@ -288,7 +338,7 @@ class RegistrarClient:
         method: str,
         path: str,
         body: dict[str, Any] | None,
-        auth: bool,
+        auth: str | None,
         client_id: str | None = None,
     ) -> dict[str, Any]:
         url = self._base + path
@@ -299,9 +349,7 @@ class RegistrarClient:
             # None when telemetry is disabled — the id then never rides.
             headers["X-Client-Id"] = client_id[:64]
         if auth:
-            if not self._service_token:
-                raise RegistrarError(401, "M_MISSING_TOKEN", "no service token configured")
-            headers["Authorization"] = f"Bearer {self._service_token}"
+            headers["Authorization"] = f"Bearer {auth}"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310  # our own registrar endpoint (default https; override is operator-controlled)
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310  # our own registrar endpoint (default https; override is operator-controlled)

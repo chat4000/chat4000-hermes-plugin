@@ -1,9 +1,10 @@
 """Bot credentials store — the v2 replacement for the v1 group-key file.
 
-After self-onboarding (registrar `kind=plugin` redeem) the plugin holds a durable
-Matrix bot identity: its MXID, device_id, access_token, the gateway_url, and the
-registrar-issued plugin_id. These are what redeem returns and all the plugin
-persists — it talks to the gateway for everything else.
+After self-onboarding (registrar `POST /plugins`, C.1) the plugin holds a durable
+Matrix bot identity: its MXID, device_id, access_token, and the gateway_url.
+These are what `POST /plugins` returns and all the plugin persists — it talks to
+the gateway for everything else. There is NO `plugin_id`: the bot MXID is the
+plugin identity (protocol B), and the user is DERIVED from it at `PUT /user`.
 
 Stored at ~/.hermes/plugins/chat4000/matrix-creds.json (mode 0600). The Olm/Megolm
 key material lives in a SEPARATE SQLite store owned by the pyvodozemac binding —
@@ -31,7 +32,6 @@ class BotCreds:
     device_id: str
     access_token: str
     gateway_url: str
-    plugin_id: str | None = None
 
     @property
     def server_name(self) -> str:
@@ -55,7 +55,6 @@ def load_bot_creds(account_id: str = "default") -> BotCreds | None:
             device_id=d["device_id"],
             access_token=d["access_token"],
             gateway_url=d["gateway_url"],
-            plugin_id=d.get("plugin_id"),
         )
     except (OSError, json.JSONDecodeError, KeyError, TypeError):
         # Missing / unreadable / malformed creds → unconfigured (callers branch).
