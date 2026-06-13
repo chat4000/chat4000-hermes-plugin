@@ -15,7 +15,7 @@ import pytest
 
 from chat4000_hermes_plugin import setup_flow
 from chat4000_hermes_plugin.matrix.registrar_client import PluginBirth, UserEnsureResult
-from chat4000_hermes_plugin.matrix.users_store import load_known_users
+from chat4000_hermes_plugin.matrix.users_store import load_known_users, load_onboarded
 
 ENSURED_USER = "@u_one:hs"
 BOT_TOKEN = "tok"  # noqa: S105  # test fixture, not a secret
@@ -53,6 +53,7 @@ class FakeRooms:
         self.create_calls: list[str] = []
         self.invites: list[tuple[str, str]] = []
         self.discover_calls = 0
+        self._next_session_n = 0
         # The "homeserver's" persistent truth, fed back by discover().
         self.existing_space = None
         self.existing_control = None
@@ -71,6 +72,15 @@ class FakeRooms:
         self.create_calls.append("control")
         self.control_room_id = self.existing_control = "!control:hs"
         return self.control_room_id
+
+    async def create_session_room_and_invite(self, members, title="New chat", agent_id="main"):
+        # Mirrors RoomManager.create_session_room_and_invite: one room + invites.
+        self.create_calls.append("session")
+        self._next_session_n += 1
+        room_id = f"!session{self._next_session_n}:hs"
+        for uid in members:
+            self.invites.append((room_id, uid))
+        return room_id
 
     async def invite_user(self, room_id, user_id):
         # Idempotent like the real one (re-inviting is benign) — never raises.
@@ -103,11 +113,19 @@ async def test_setup_first_run_creates_everything_in_order(rooms):
     assert outcome.user_created is True
     assert outcome.space_id == "!space:hs"
     assert outcome.control_room_id == "!control:hs"
-    assert rooms.create_calls == ["space", "control"]
-    # The user is invited to BOTH rooms at setup — before any device pairs.
-    assert rooms.invites == [("!space:hs", ENSURED_USER), ("!control:hs", ENSURED_USER)]
+    # Space + control + ONE starter chat room — all at setup (C.6 step 3).
+    assert rooms.create_calls == ["space", "control", "session"]
+    # The user is invited to all THREE rooms at setup — before any device pairs.
+    assert rooms.invites == [
+        ("!space:hs", ENSURED_USER),
+        ("!control:hs", ENSURED_USER),
+        ("!session1:hs", ENSURED_USER),
+    ]
     # The one user is durably recorded for the gateway's member/key-share floor.
     assert load_known_users("default") == [ENSURED_USER]
+    # The starter chat is durably marked onboarded — the dedupe that stops a
+    # second one ever being made (E "The starter chat room").
+    assert load_onboarded("default") == {ENSURED_USER: "!session1:hs"}
 
 
 async def test_setup_is_idempotent_across_reruns(rooms):
@@ -121,14 +139,40 @@ async def test_setup_is_idempotent_across_reruns(rooms):
     assert reg.user_ensure_calls == 2
     assert second.user_id == ENSURED_USER
     assert second.user_created is False
-    # …and no duplicate rooms: the re-run discovers, it does not recreate.
-    assert rooms.create_calls == ["space", "control"]
+    # …and no duplicate rooms: the re-run discovers space+control (no recreate)
+    # and the starter chat is created EXACTLY ONCE — the onboarded marker from
+    # the first run dedupes it (E "The starter chat room"). So no second
+    # "session" create on the re-run.
+    assert rooms.create_calls == ["space", "control", "session"]
     assert second.space_id == "!space:hs"
     assert second.control_room_id == "!control:hs"
-    # Re-inviting is benign and attempted again (no failure on existing invites).
+    # Re-inviting space/control is benign and attempted again; the starter chat
+    # is invited exactly once (created only on the first run).
     assert rooms.invites.count(("!space:hs", ENSURED_USER)) == 2
-    # The known-users store stays a single entry — one user per plugin (B).
+    assert rooms.invites.count(("!session1:hs", ENSURED_USER)) == 1
+    # The known-users store stays a single entry — one user per plugin (B), and
+    # exactly one starter chat is recorded onboarded across both runs.
     assert load_known_users("default") == [ENSURED_USER]
+    assert load_onboarded("default") == {ENSURED_USER: "!session1:hs"}
+
+
+async def test_setup_creates_exactly_one_starter_chat_room(rooms):
+    """E "The starter chat room" / C.6 step 3: setup creates EXACTLY ONE starter
+    session room and invites the user; re-running setup mints no second one
+    (durable onboarded dedupe). The starter chat is created at setup — never at
+    pairing-completion — with no crypto and no message send."""
+    reg = FakeRegistrar()
+    await setup_flow.ensure_setup("default", registrar=reg)
+    await setup_flow.ensure_setup("default", registrar=reg)
+    await setup_flow.ensure_setup("default", registrar=reg)
+
+    # Exactly one "session" (starter chat) create across three setup runs.
+    assert rooms.create_calls.count("session") == 1
+    # …and exactly one starter-chat invite for the one user.
+    session_invites = [inv for inv in rooms.invites if inv[0].startswith("!session")]
+    assert session_invites == [("!session1:hs", ENSURED_USER)]
+    # The durable marker pins it to that one room.
+    assert load_onboarded("default") == {ENSURED_USER: "!session1:hs"}
 
 
 async def test_setup_surfaces_registrar_failure(rooms):

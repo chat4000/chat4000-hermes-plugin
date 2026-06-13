@@ -10,7 +10,9 @@ operation. In order (C.6):
      wipe-proof, never a second account (no `plugin_id`)
   3. open a SHORT-LIVED bot Matrix session and create the workspace space +
      control room (both with `m.room.encryption` at creation; control marked
-     `chat4000.room_kind: control`), then invite the user to both
+     `chat4000.room_kind: control`) AND one starter chat room (an ordinary
+     session room, deduped per user, E "The starter chat room"), then invite
+     the user to all three
   4. NO key pre-sharing — ever (the single-crypto-owner rule)
 
 The short-lived session here deliberately NEVER loads the OlmMachine: room
@@ -35,7 +37,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .matrix.creds_store import BotCreds
-from .matrix.users_store import add_known_user
+from .matrix.users_store import add_known_user, load_onboarded, mark_onboarded
 from .onboarding import ensure_onboarded
 from .package_info import read_package_version
 
@@ -105,6 +107,21 @@ async def ensure_setup(
         for room_id in (rooms.space_id, rooms.control_room_id):
             if room_id:
                 await rooms.invite_user(room_id, ensured.user_id)
+        # The starter chat room (E "The starter chat room", C.6 step 3): one
+        # ordinary session room so a freshly paired device opens to a usable
+        # chat, not an empty account. Created HERE at setup — never at
+        # pairing-completion. Deduped per user via the durable onboarded store
+        # (the same marker `_ensure_initial_session` uses), so re-running setup,
+        # gateway restarts, and additional device pairings never mint a second.
+        # No crypto, no message send — just create + invite (single-crypto-owner).
+        if ensured.user_id not in load_onboarded(account):
+            starter_room_id = await rooms.create_session_room_and_invite([ensured.user_id])
+            mark_onboarded(ensured.user_id, starter_room_id, account)
+            logger.info(
+                "chat4000 setup: created starter chat room %s for %s",
+                starter_room_id,
+                ensured.user_id,
+            )
         space_id, control_room_id = rooms.space_id, rooms.control_room_id
 
     return SetupOutcome(

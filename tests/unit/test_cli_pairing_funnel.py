@@ -55,6 +55,14 @@ class _FakeSetupRooms:
         self.created.append("control")
         return self.control_room_id
 
+    async def create_session_room_and_invite(self, members, title="New chat", agent_id="main"):
+        # C.6 step-3 starter chat room: one session room + invites.
+        self.created.append("session")
+        room_id = "!starter:hs"
+        for uid in members:
+            self.invited.append((room_id, uid))
+        return room_id
+
     async def invite_user(self, room_id, user_id):
         self.invited.append((room_id, user_id))
 
@@ -138,9 +146,7 @@ def _names(events):
     return [e for e, _ in events]
 
 
-async def test_success_emits_only_pairing_completed_with_pl4_props(
-    monkeypatch, fake_room_session
-):
+async def test_success_emits_only_pairing_completed_with_pl4_props(monkeypatch, fake_room_session):
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
     reg = _OkReg()
     monkeypatch.setattr(cli, "_registrar", lambda: reg)
@@ -290,18 +296,21 @@ async def test_reusable_no_redeem_emits_nothing(monkeypatch, fake_room_session):
 
 
 async def test_setup_runs_user_ensure_and_invites_before_the_code(monkeypatch, fake_room_session):
-    """C.6: setup creates the user + space + control room + invites BEFORE the
-    pairing code exists, so pairing is purely a device operation."""
+    """C.6: setup creates the user + space + control room + starter chat room +
+    invites BEFORE the pairing code exists, so pairing is purely a device
+    operation and a redeemed device opens to a usable chat (E "The starter
+    chat room")."""
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
     reg = _OkReg()
     monkeypatch.setattr(cli, "_registrar", lambda: reg)
     _capture(monkeypatch)
     await cli._run_pair("default")
     assert reg.user_ensure_calls == 1
-    assert fake_room_session.created == ["space", "control"]
+    assert fake_room_session.created == ["space", "control", "session"]
     assert fake_room_session.invited == [
         ("!space:hs", ENSURED_USER),
         ("!control:hs", ENSURED_USER),
+        ("!starter:hs", ENSURED_USER),
     ]
 
 
