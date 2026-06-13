@@ -302,6 +302,23 @@ class Chat4000MatrixAdapter:
         user_id = str(status.get("user_id") or "")
         if user_id:
             add_known_user(user_id, self._account_id)
+            # Refresh the redeeming user's device keys (protocol E, "Refresh the new
+            # device's keys on redeem"): FORCE a /keys/query so the agent learns the
+            # just-paired device and its next send Megolm-shares the room key to it.
+            # The user is tracked from setup (with zero devices then), so a plain
+            # re-track is idempotent and would NOT re-query — we must force it. This
+            # is in addition to (not a replacement for) the best-effort
+            # device_lists.changed sync delta, which is empty on initial sync and
+            # racy. Best-effort: a failure here must not break redeem handling.
+            crypto = self._session.crypto if self._session is not None else None
+            if crypto is not None:
+                try:
+                    await crypto.force_query_user(user_id)
+                except Exception as exc:  # noqa: BLE001
+                    from ..error_log import dump_chat4000_trace
+
+                    logger.warning("force key re-query for %s failed: %s", user_id, exc)
+                    dump_chat4000_trace("matrix.force_query_user", exc, {"user_id": user_id})
         logger.info(
             "chat4000: pairing redeem observed (device=%s, reusable=%s)",
             entry.get("device_id"),

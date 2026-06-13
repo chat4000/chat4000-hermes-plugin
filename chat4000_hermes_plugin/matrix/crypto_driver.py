@@ -198,6 +198,44 @@ class CryptoDriver:
             await asyncio.to_thread(self._m.update_tracked_users, user_ids)
         await self.drain_outgoing()
 
+    async def force_query_user(self, user_id: str) -> None:
+        """FORCE a fresh `/keys/query` for `user_id`, even if already tracked
+        (protocol E, "Refresh the new device's keys on redeem"). On observing a
+        redeem the plugin MUST re-query the redeeming user's device list so its next
+        send Megolm-shares the room key to the just-paired device — independent of
+        the best-effort `device_lists.changed` sync delta.
+
+        Why this is needed and not just `track_users`: the redeeming user is already
+        tracked from setup (when they had ZERO devices), so `update_tracked_users`
+        is idempotent and will NOT re-query them — leaving the agent unaware of the
+        new device and sharing the key to nobody (the proven UTD bug). The binding
+        (chat4000_pyvodozemac, see its .pyi) exposes no direct "force re-query" /
+        "mark dirty" primitive, so we use the robust fallback the spec names: feed a
+        synthetic `device_lists.changed` for the user through the SAME
+        `receive_sync_changes` path used on every sync, which marks the (tracked)
+        user's device list dirty, then drain — the drain emits a `/keys/query` for
+        that user. We first ensure the user is tracked (idempotent) because a
+        `changed` entry for an UNtracked user is ignored by matrix-sdk-crypto.
+
+        We pass `next_batch=None` so this synthetic call does NOT move the to-device
+        cursor (no real to-device frame is being acked here) — it only marks the
+        device list dirty. The drain runs inside drain_outgoing's lock; this method
+        takes the lock only for the synthetic receive so the two don't race."""
+        async with self._lock:
+            # Ensure tracked (idempotent — a `changed` entry for an untracked user
+            # is ignored), then synthesize the device-list change that forces the
+            # re-query on the next drain.
+            await asyncio.to_thread(self._m.update_tracked_users, [user_id])
+            await asyncio.to_thread(
+                self._m.receive_sync_changes,
+                json.dumps([]),  # no to-device events
+                json.dumps({"changed": [user_id], "left": []}),  # mark this user dirty
+                json.dumps({}),  # no one-time-key count change
+                None,  # no fallback-key change
+                None,  # next_batch=None → do NOT advance the to-device cursor
+            )
+        await self.drain_outgoing()
+
     # ─── internals ────────────────────────────────────────────────────────
 
     async def drain_outgoing(self) -> None:

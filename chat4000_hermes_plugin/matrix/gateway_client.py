@@ -43,6 +43,7 @@ from websockets.asyncio.client import ClientConnection
 
 from ..error_log import dump_chat4000_trace
 from ..reconnect import run_with_reconnect
+from .cursor_store import CursorStore
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +84,17 @@ class GatewayClient:
         on_reauth: ReauthHandler | None = None,
         request_timeout: float = 30.0,
         abort_signal: asyncio.Event | None = None,
+        cursor_store: CursorStore | None = None,
     ) -> None:
         self._creds = creds
         self._on_sync = on_sync
         self._on_reauth = on_reauth
         self._request_timeout = request_timeout
         self._abort = abort_signal or asyncio.Event()
+        # Durable home for the two sliding-sync cursors (protocol D). Persisted on
+        # every ack and loaded here so a PROCESS restart resumes an INCREMENTAL sync
+        # (a fresh, cursor-less sync would drop the device_lists delta — a D violation).
+        self._cursor_store = cursor_store
 
         self._ws: ClientConnection | None = None
         self._pending: dict[str, asyncio.Future[tuple[int, dict[str, Any]]]] = {}
@@ -103,6 +109,13 @@ class GatewayClient:
         # it separately, and carry the last value forward on frames with none.
         self._last_persisted_pos: str | None = None
         self._last_persisted_to_device_pos: str | None = None
+        # Replay durably-persisted cursors so a fresh process resumes incrementally
+        # (protocol D, "Refresh the new device's keys on redeem": a restart that
+        # begins a cursor-less sync silently drops the device_lists delta).
+        if self._cursor_store is not None:
+            persisted = self._cursor_store.load()
+            self._last_persisted_pos = persisted.pos
+            self._last_persisted_to_device_pos = persisted.to_device_pos
 
         self.user_id: str | None = None
         self.device_id: str | None = None
@@ -188,6 +201,14 @@ class GatewayClient:
         # only if we've never received one (absent → gateway leaves it unchanged).
         if self._last_persisted_to_device_pos is not None:
             frame["to_device_pos"] = self._last_persisted_to_device_pos
+        # Durably persist BOTH cursors (atomically, together) so a PROCESS restart —
+        # not just a same-process reconnect — resumes incrementally (protocol D).
+        # This runs on the ack path, i.e. AFTER the crypto driver flushed this
+        # frame's room keys (receive_sync_changes) — so we never record a
+        # to_device_pos ahead of its keys ("ack-only-after-durable").
+        cursor_store = getattr(self, "_cursor_store", None)
+        if cursor_store is not None:
+            cursor_store.persist(self._last_persisted_pos, self._last_persisted_to_device_pos)
         await self._send(frame)
 
     # ─── run loop ─────────────────────────────────────────────────────────

@@ -24,6 +24,7 @@ from typing import Any
 
 from .creds_store import BotCreds, crypto_store_path
 from .crypto_driver import CryptoDriver, OlmMachineLike, load_olm_machine
+from .cursor_store import CursorStore
 from .gateway_client import GatewayClient, GatewayCredentials
 from .rooms import RoomManager
 from .sliding_sync import build_sync_request
@@ -100,6 +101,9 @@ class MatrixSession:
                 platform="linux",
             ),
             on_sync=self._on_sync,
+            # Durably persist + replay BOTH sync cursors (protocol D) so a process
+            # restart resumes an incremental sync and keeps the device_lists delta.
+            cursor_store=CursorStore(self._account_id),
         )
         self.crypto = CryptoDriver(self._machine, self.gateway)
         self.rooms = RoomManager(self.gateway, self._creds.server_name)
