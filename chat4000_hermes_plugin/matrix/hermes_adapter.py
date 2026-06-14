@@ -34,7 +34,7 @@ from .creds_store import load_bot_creds
 from .pair_listener import CompletionListener
 from .session import MatrixSession
 from .turns import TurnWriter
-from .version_poller import VersionPoller, restart_gateway
+from .version_poller import VersionPoller
 
 if TYPE_CHECKING:
     from .media import MediaClient
@@ -213,8 +213,9 @@ class Chat4000MatrixAdapter:
     def _start_version_poller(self) -> None:
         """Spawn the resident plugin-version poller (C.5.2). It polls the registrar
         on an env-gated cadence (stage 60 s / prod 1 h) and, when the running build
-        drifts from the registrar's `current_version`, reinstalls `source` and
-        restarts into it — deferring the restart until no turn is in flight."""
+        drifts from the registrar's `current_version`, runs the registrar-provided
+        installer command (`source`) to upgrade — deferring the launch until no turn
+        is in flight (the installer restarts the gateway)."""
         from .. import analytics
         from ..registrar_config import PLUGIN_APP_ID, build_registrar_client
 
@@ -225,7 +226,6 @@ class Chat4000MatrixAdapter:
             registrar=build_registrar_client(),
             client_id=analytics.machine_client_id(),
             is_busy=self._any_turn_active,
-            restart=restart_gateway,
         )
         self._version_poller.start()
 

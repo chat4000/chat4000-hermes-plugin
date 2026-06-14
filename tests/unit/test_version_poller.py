@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from chat4000_hermes_plugin.matrix import version_poller as vp
 from chat4000_hermes_plugin.matrix.registrar_client import PluginVersion
 from chat4000_hermes_plugin.matrix.version_poller import (
     PROD_POLL_INTERVAL_S,
@@ -30,13 +31,12 @@ def _poller(
     reg: FakeRegistrar,
     installed: str,
     is_busy: bool | list[bool] = False,
-    install_ok: bool = True,
+    launch_ok: bool = True,
     client_id: str | None = "agent-abc",
 ) -> tuple[VersionPoller, dict[str, list]]:
-    """Build a poller with recording install/restart callbacks. `is_busy` may be a
-    list to script successive busy/quiet states across deferral re-checks."""
-    rec: dict[str, list] = {"installed": [], "restarts": 0}  # type: ignore[dict-item]
-    rec["restarts"] = 0
+    """Build a poller with a recording `launch_installer` callback. `is_busy` may be
+    a list to script successive busy/quiet states across deferral re-checks."""
+    rec: dict[str, list] = {"launched": []}
 
     busy_states = is_busy if isinstance(is_busy, list) else None
     busy_iter = iter(busy_states) if busy_states is not None else None
@@ -50,20 +50,16 @@ def _poller(
         assert isinstance(is_busy, bool)
         return is_busy
 
-    def install(source: str) -> bool:
-        rec["installed"].append(source)
-        return install_ok
-
-    def restart() -> None:
-        rec["restarts"] += 1  # type: ignore[operator]
+    def launch(source: str) -> bool:
+        rec["launched"].append(source)
+        return launch_ok
 
     poller = VersionPoller(
         app_id=APP_ID,
         registrar=reg,
         client_id=client_id,
         is_busy=busy,
-        restart=restart,
-        install=install,
+        launch_installer=launch,
         installed_version=lambda: installed,
     )
     return poller, rec
@@ -87,15 +83,13 @@ def test_unknown_env_falls_back_to_prod_cadence() -> None:
 
 
 def test_poll_interval_override_wins() -> None:
-    reg = FakeRegistrar(PluginVersion(current_version="1.0.0", source="git+x"))
-    poller, _ = _poller(reg=reg, installed="1.0.0")
+    reg = FakeRegistrar(PluginVersion(current_version="1.0.0", source="curl … | bash"))
     poller_override = VersionPoller(
         app_id=APP_ID,
         registrar=reg,
         client_id=None,
         is_busy=lambda: False,
-        restart=lambda: None,
-        install=lambda _s: True,
+        launch_installer=lambda _s: True,
         installed_version=lambda: "1.0.0",
         poll_interval_s=7.0,
     )
@@ -106,7 +100,7 @@ def test_poll_interval_override_wins() -> None:
 
 
 async def test_request_sends_app_id_and_client_id_header() -> None:
-    reg = FakeRegistrar(PluginVersion(current_version="2.0.0", source="git+x"))
+    reg = FakeRegistrar(PluginVersion(current_version="2.0.0", source="curl … | bash"))
     poller, _ = _poller(reg=reg, installed="2.0.0", client_id="agent-abc")
     await poller._check_once()
     assert reg.calls == [(APP_ID, "agent-abc")]
@@ -116,55 +110,85 @@ async def test_request_sends_app_id_and_client_id_header() -> None:
 
 
 async def test_version_matches_is_noop() -> None:
-    reg = FakeRegistrar(PluginVersion(current_version="3.1.4", source="git+x@v3.1.4"))
+    reg = FakeRegistrar(PluginVersion(current_version="3.1.4", source="curl … | bash"))
     poller, rec = _poller(reg=reg, installed="3.1.4")
     await poller._check_once()
-    assert rec["installed"] == []
-    assert rec["restarts"] == 0
+    assert rec["launched"] == []
 
 
-# ─── version differs → install + restart ───────────────────────────────────────
+# ─── version differs → run the installer command verbatim ──────────────────────
 
 
-async def test_version_differs_quiet_installs_and_restarts() -> None:
-    src = "git+https://github.com/x/chat4000-hermes-plugin@v9.9.9"
+async def test_version_differs_quiet_launches_installer() -> None:
+    src = "curl -fsSL https://…/install.sh | bash -s -- --hermes-branch v9.9.9 --no-pair --stage"
     reg = FakeRegistrar(PluginVersion(current_version="9.9.9", source=src))
     poller, rec = _poller(reg=reg, installed="1.0.0", is_busy=False)
     await poller._check_once()
-    assert rec["installed"] == [src]
-    assert rec["restarts"] == 1
+    # The poller runs the registrar's `source` verbatim — exactly one launch, and
+    # the installer (not the poller) does the install + restart.
+    assert rec["launched"] == [src]
+    assert poller._pending_source is None
 
 
-async def test_version_differs_busy_defers_restart_until_quiet() -> None:
-    src = "git+x@v9.9.9"
+async def test_version_differs_busy_defers_launch_until_quiet() -> None:
+    src = "curl … | bash -s -- --hermes-branch v9.9.9 --no-pair --stage"
     reg = FakeRegistrar(PluginVersion(current_version="9.9.9", source=src))
-    # Busy on the first check (and its immediate restart attempt), quiet after.
+    # Busy on the first check (and its immediate launch attempt), quiet after.
     poller, rec = _poller(reg=reg, installed="1.0.0", is_busy=[True, True])
 
-    # First tick: installs, but defers restart (busy).
+    # First tick: mismatch seen, but launch deferred (busy) — nothing run yet.
     await poller._check_once()
-    assert rec["installed"] == [src]
-    assert rec["restarts"] == 0
+    assert rec["launched"] == []
     assert poller._pending_source == src
 
     # Next tick while still busy: does NOT re-poll the registrar, still deferred.
     await poller._check_once()
     assert len(reg.calls) == 1  # no second /plugin-version poll
-    assert rec["restarts"] == 0
+    assert rec["launched"] == []
 
-    # Next tick once quiet: restarts into the installed build.
+    # Next tick once quiet: launches the installer command.
     await poller._check_once()
-    assert rec["restarts"] == 1
+    assert rec["launched"] == [src]
     assert poller._pending_source is None
 
 
-async def test_install_failure_retries_next_tick() -> None:
-    src = "git+x@v9.9.9"
+async def test_launch_failure_re_evaluates_next_tick() -> None:
+    src = "curl … | bash -s -- --hermes-branch v9.9.9 --no-pair --stage"
     reg = FakeRegistrar(PluginVersion(current_version="9.9.9", source=src))
-    poller, rec = _poller(reg=reg, installed="1.0.0", install_ok=False)
+    poller, rec = _poller(reg=reg, installed="1.0.0", launch_ok=False)
     await poller._check_once()
-    # Install attempted but failed → no restart, nothing pending (retries on the
-    # next poll, not via the deferred-restart path).
-    assert rec["installed"] == [src]
-    assert rec["restarts"] == 0
+    # Launch attempted but failed → nothing pending; the next poll re-evaluates the
+    # version from scratch (no stuck deferred state).
+    assert rec["launched"] == [src]
     assert poller._pending_source is None
+
+
+# ─── _spawn_installer: run source verbatim, detached ───────────────────────────
+
+
+def test_spawn_installer_runs_source_verbatim_detached(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        def __init__(self, cmd: str, **kwargs: object) -> None:
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(vp.subprocess, "Popen", FakePopen)
+    cmd = "curl -fsSL https://…/install.sh | bash -s -- --hermes-branch v1.1.1 --no-pair --stage"
+    assert vp._spawn_installer(cmd) is True
+    # Run verbatim through a shell (the source has a pipe), in a new session so the
+    # installer survives the gateway restart it triggers.
+    assert captured["cmd"] == cmd
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["shell"] is True
+    assert kwargs["start_new_session"] is True
+
+
+def test_spawn_installer_returns_false_on_oserror(monkeypatch) -> None:
+    def boom(*_a: object, **_k: object) -> object:
+        raise OSError("cannot spawn")
+
+    monkeypatch.setattr(vp.subprocess, "Popen", boom)
+    assert vp._spawn_installer("anything") is False
