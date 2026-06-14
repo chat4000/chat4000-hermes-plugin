@@ -43,7 +43,7 @@ from .telemetry import (
     set_telemetry_enabled,
 )
 
-APP_ID = "@chat4000/hermes-plugin"
+APP_ID = registrar_config.PLUGIN_APP_ID
 
 # QR payload base for pairing. An https universal link (not the chat4000://
 # scheme) so any stock camera app can scan it.

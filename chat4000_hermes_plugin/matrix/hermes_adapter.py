@@ -34,6 +34,7 @@ from .creds_store import load_bot_creds
 from .pair_listener import CompletionListener
 from .session import MatrixSession
 from .turns import TurnWriter
+from .version_poller import VersionPoller, restart_gateway
 
 if TYPE_CHECKING:
     from .media import MediaClient
@@ -107,6 +108,10 @@ class Chat4000MatrixAdapter:
         # The pairing-completion listener (protocol C.4): the gateway-resident
         # system of record for every outstanding pairing code.
         self._pair_listener: CompletionListener | None = None
+        # The resident plugin-version poller (protocol C.5.2): periodically asks
+        # the registrar which build to run, reinstalling + restarting when it drifts
+        # — deferring the restart until no turn is in flight.
+        self._version_poller: VersionPoller | None = None
 
         # Make this adapter discoverable by plugin_hooks (tool bubbles).
         from ..plugin_hooks import register_active_adapter
@@ -202,7 +207,27 @@ class Chat4000MatrixAdapter:
         # Resume completion listening for every outstanding pairing code (C.4) —
         # including codes registered before a restart and reusable ones.
         pair_listener.start()
+        self._start_version_poller()
         return True
+
+    def _start_version_poller(self) -> None:
+        """Spawn the resident plugin-version poller (C.5.2). It polls the registrar
+        on an env-gated cadence (stage 60 s / prod 1 h) and, when the running build
+        drifts from the registrar's `current_version`, reinstalls `source` and
+        restarts into it — deferring the restart until no turn is in flight."""
+        from .. import analytics
+        from ..registrar_config import PLUGIN_APP_ID, build_registrar_client
+
+        # C.5.2 is service-token auth (build_registrar_client supplies it); the
+        # X-Client-Id header carries the machine's agent_install_id (IDN8).
+        self._version_poller = VersionPoller(
+            app_id=PLUGIN_APP_ID,
+            registrar=build_registrar_client(),
+            client_id=analytics.machine_client_id(),
+            is_busy=self._any_turn_active,
+            restart=restart_gateway,
+        )
+        self._version_poller.start()
 
     def _mark_ready(self) -> None:
         from ..key_store import resolve_chat4000_ready_marker
@@ -362,6 +387,9 @@ class Chat4000MatrixAdapter:
         if self._pair_listener is not None:
             await self._pair_listener.stop()
             self._pair_listener = None
+        if self._version_poller is not None:
+            await self._version_poller.stop()
+            self._version_poller = None
         self._clear_ready()
         from ..plugin_hooks import deregister_active_adapter
 
@@ -747,6 +775,12 @@ class Chat4000MatrixAdapter:
         if not self._question_id.get(room_id):
             return False
         return self._status_state.get(room_id) != "idle"
+
+    def _any_turn_active(self) -> bool:
+        """True while ANY room has an in-flight turn — the C.5 "message path" guard
+        the version poller honours before a reinstall-restart. A room is in flight
+        from message receipt (status 'thinking') until its turn-end 'idle'."""
+        return any(self._turn_is_active(room_id) for room_id in self._question_id)
 
     @staticmethod
     def _content_text(content: Any) -> str:  # noqa: ANN401  # Hermes content can be str/dict/etc.

@@ -17,6 +17,11 @@ REGISTRAR_URLS = {
     "stage": "https://registrar.stgcht4.duckdns.org",
 }
 
+# The plugin's bundle id — the policy/source key for the registrar version
+# endpoints (C.5.1 `POST /version`, C.5.2 `POST /plugin-version`). One canonical
+# definition so the CLI's boot check and the resident poller can never drift.
+PLUGIN_APP_ID = "@chat4000/hermes-plugin"
+
 # Static shared service token. It gates pairing-code registration, status polling,
 # and plugin-version lookup (never content) — basic-auth-grade by design: it ships
 # in the client, so treat it as public. Override with CHAT4000_SERVICE_TOKEN.
