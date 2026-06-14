@@ -157,7 +157,7 @@ async def test_success_emits_only_pairing_completed_with_pl4_props(monkeypatch, 
     # PL3: telemetry is disabled in tests → the X-Client-Id value is None
     # (the id never rides any wire); the posthog_id body field is gone.
     assert reg.version_calls == [
-        (("@chat4000/hermes-plugin", "1.1.0", "production"), {"client_id": None})
+        (("@chat4000/hermes-plugin", "1.1.1", "production"), {"client_id": None})
     ]
     # DEC3: pairing_completed is the ONLY plugin event in the whole flow.
     assert _names(events) == ["pairing_completed"]
