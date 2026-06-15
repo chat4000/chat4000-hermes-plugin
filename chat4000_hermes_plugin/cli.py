@@ -619,8 +619,24 @@ def _render_qr_if_possible(payload: str) -> None:
     import click
 
     click.echo(f"QR payload: {payload}")
-    if not sys.stdout.isatty():
-        return
+    # Draw the scannable QR on a TERMINAL. Normally that's stdout — but the installer
+    # runs us with stdout tee'd to its always-on /tmp debug log (a pipe, so
+    # sys.stdout.isatty() is False) while the user is still sitting at a real
+    # terminal. So when stdout isn't a tty, fall back to the controlling terminal
+    # /dev/tty. If neither is a terminal (a truly headless / detached upgrade run),
+    # skip — there is no human to scan it and the printed code + payload above are
+    # enough. This lets the always-on debug log (the tee) AND the interactive QR
+    # coexist: the QR targets the real terminal, not the tee'd stdout.
+    term = None
+    opened = False
+    if sys.stdout.isatty():
+        term = sys.stdout
+    else:
+        try:
+            term = open("/dev/tty", "w")  # noqa: SIM115 — closed in finally
+            opened = True
+        except OSError:
+            return  # no terminal anywhere — nothing to draw the QR on.
     try:
         import qrcode
 
@@ -629,7 +645,8 @@ def _render_qr_if_possible(payload: str) -> None:
         qr.make(fit=True)
         buf = io.StringIO()
         qr.print_ascii(out=buf, invert=True)
-        click.echo(buf.getvalue())
+        term.write(buf.getvalue())
+        term.flush()
     except ImportError:
         pass  # qrcode not installed — the textual code above is enough
     except Exception as exc:  # noqa: BLE001
@@ -637,6 +654,12 @@ def _render_qr_if_possible(payload: str) -> None:
         from .error_log import dump_chat4000_trace
 
         dump_chat4000_trace("cli.render_qr", exc)
+    finally:
+        if opened:
+            try:
+                term.close()
+            except OSError:
+                pass
 
 
 def _handle_cli_error(exc: BaseException) -> None:
