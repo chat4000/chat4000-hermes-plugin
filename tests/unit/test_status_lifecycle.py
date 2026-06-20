@@ -190,6 +190,58 @@ async def test_out_of_turn_send_still_pushes_immediately(monkeypatch) -> None:  
     assert a._pending_turns == {}
 
 
+async def test_tool_narration_out_of_turn_never_pushes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Host tool-activity narration (`💻 terminal: …`, `📚 skill_view: …`) is NOT the
+    final answer. Even when it lands with no active turn — the case that previously
+    marked send() final=True → push=True and woke the user — it must stream
+    push:false and never be tracked as a pending final answer (protocol E)."""
+    _install_send_result(monkeypatch)
+    sink: list[Record] = []
+    a = _adapter(sink)  # no question id → turn looks inactive
+    await a.send("!r", '💻 terminal: "python3 - <<\'PY\' …"')
+    # streamed non-final (push:false), and never the push:true final edit.
+    assert ("answer", "!r", "$anchor-1", '💻 terminal: "python3 - <<\'PY\' …"', False) in sink
+    assert not any(row[0] == "answer" and row[4] is True for row in sink)
+    # never registered as a pending final answer.
+    assert a._pending_turns == {}
+
+
+async def test_tool_narration_in_turn_not_finalized_by_stop_typing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """During an active turn, tool narration via send()/edit_message() must not be
+    recorded as the pending answer, so stop_typing()'s finalizer never re-edits it
+    with push:true. The REAL answer that follows is still pushed normally."""
+    _install_send_result(monkeypatch)
+    sink: list[Record] = []
+    a = _adapter(sink)
+    a._question_id["!r"] = "$q"
+    await a._status("!r", "thinking")
+    sink.clear()
+
+    narration_text = "📚 skill_view: news-research-monitoring"
+    narration = await a.send("!r", narration_text)
+    # narration anchor is NOT pending → stop_typing won't push it.
+    assert a._pending_turns == {}
+    real = await a.send("!r", "A. Ynet / A1. headline")
+    await a.stop_typing("!r")
+
+    assert real.message_id == "$anchor-2"
+    # the narration anchor never gets a push:true final edit.
+    narration_final = ("answer", "!r", narration.message_id, narration_text, True)
+    assert narration_final not in sink
+    # the real answer DOES.
+    assert ("answer", "!r", "$anchor-2", "A. Ynet / A1. headline", True) in sink
+
+
+async def test_real_answer_still_pushes_when_out_of_turn(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Guard: a genuine prose answer out-of-turn is NOT tool narration and must
+    still push immediately (unchanged from prior behavior)."""
+    _install_send_result(monkeypatch)
+    sink: list[Record] = []
+    a = _adapter(sink)
+    await a.send("!r", "A. Ynet / A1. the top headline is …")
+    assert ("answer", "!r", "$anchor-1", "A. Ynet / A1. the top headline is …", True) in sink
+
+
 async def test_edit_message_streams_without_pushing_until_stop_typing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _install_send_result(monkeypatch)
     sink: list[Record] = []

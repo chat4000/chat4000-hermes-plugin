@@ -33,6 +33,7 @@ from .commands import CommandHandler
 from .creds_store import load_bot_creds
 from .pair_listener import CompletionListener
 from .session import MatrixSession
+from .tool_transcript import is_pure_tool_transcript
 from .turns import TurnWriter
 from .version_poller import VersionPoller
 
@@ -524,9 +525,16 @@ class Chat4000MatrixAdapter:
         tw = self._tw(chat_id)
         anchor = await tw.start_turn(chat_id)
         if anchor:
-            final = not self._turn_is_active(chat_id)
+            # Pure tool-activity narration (host strings like `💻 terminal: …`,
+            # `📚 skill_view: …`) is NOT the turn's final answer, so per protocol E
+            # it must NEVER be push-eligible. It arrives through this same text path
+            # and, when the turn looks inactive, would otherwise be marked final
+            # → push:true and wake the user with a banner. Force it non-final so it
+            # streams silently (push:false) and is never tracked as the final answer.
+            is_tool_narration = is_pure_tool_transcript(text)
+            final = (not self._turn_is_active(chat_id)) and not is_tool_narration
             await tw.stream_edit(chat_id, anchor, text, final=final)
-            if not final:
+            if not final and not is_tool_narration:
                 self._pending_turns[chat_id] = _PendingTurn(anchor_id=anchor, latest_text=text)
         return SendResult(success=True, message_id=anchor or "")
 
@@ -550,7 +558,11 @@ class Chat4000MatrixAdapter:
             return SendResult(success=True, message_id=message_id)
 
         await self._tw(chat_id).stream_edit(chat_id, message_id, text, final=False)
-        if self._turn_is_active(chat_id):
+        # Pure tool-activity narration must never become the turn's pending final
+        # answer — if it did, stop_typing()'s finalizer would re-edit it with
+        # push:true and wake the user (protocol E: only the final answer pushes).
+        # The stream_edit above is already push:false; we just refuse to track it.
+        if self._turn_is_active(chat_id) and not is_pure_tool_transcript(text):
             pending = self._pending_turns.get(chat_id)
             if pending is None or pending.anchor_id != message_id:
                 pending = _PendingTurn(anchor_id=message_id, latest_text=text)
