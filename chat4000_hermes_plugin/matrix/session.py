@@ -32,6 +32,10 @@ from .turns import TurnWriter
 
 logger = logging.getLogger(__name__)
 
+# Cap on remembered control-command event_ids (FIFO eviction). Bounds memory while
+# covering any realistic re-delivery window.
+_MAX_HANDLED_COMMAND_EVENTS = 512
+
 # (room_id, sender, content, event_id) — event_id is the QUESTION event (for status)
 UserMessageCb = Callable[[str, str, dict[str, Any], str], Awaitable[None]]
 CommandCb = Callable[
@@ -72,6 +76,12 @@ class MatrixSession:
         # The set we've asked the OlmMachine to track device lists for (so we only
         # re-issue /keys/query when it actually changes).
         self._tracked: set[str] = set()
+        # event_ids of control commands we've already dispatched. A control event
+        # can be RE-DELIVERED (a fresh re-sync after sync_reset/reconnect replays
+        # recent timeline); without this, each replay re-runs the command — e.g.
+        # device.pair_start minting a NEW pairing code every time (the "too many
+        # active codes" storm). Insertion-ordered dict used as a bounded FIFO.
+        self._handled_command_events: dict[str, None] = {}
         # Set after the FIRST sync frame is processed — the gateway is then truly
         # receiving + crypto-warm. The 'ready' signal waits on this, not just on
         # room bootstrap (which completes ~instantly when rooms already exist).
@@ -270,6 +280,24 @@ class MatrixSession:
         # Command boundary (E): only honor chat4000.command in the control room.
         if msgtype == "chat4000.command":
             if self.rooms is not None and room_id == self.rooms.control_room_id:
+                # Dedup by event_id: a re-delivered command (a fresh re-sync after
+                # sync_reset/reconnect replays recent timeline) MUST NOT re-run, or
+                # device.pair_start mints a new pairing code per replay (the "too
+                # many active codes" storm). A genuine retry carries a new event_id.
+                event_id = ev.get("event_id") or ""
+                if event_id and event_id in self._handled_command_events:
+                    logger.debug(
+                        "skip duplicate command=%s event_id=%s (already handled)",
+                        content.get("command"),
+                        event_id,
+                    )
+                    return
+                if event_id:
+                    self._handled_command_events[event_id] = None
+                    if len(self._handled_command_events) > _MAX_HANDLED_COMMAND_EVENTS:
+                        self._handled_command_events.pop(
+                            next(iter(self._handled_command_events))
+                        )
                 logger.debug(
                     "routing command=%s room=%s (control)", content.get("command"), room_id
                 )

@@ -59,6 +59,35 @@ async def test_command_in_control_room_is_honored():
     assert cap == [("cmd", "!control:hs", "session.new", clear["content"], "@u:hs")]
 
 
+async def test_duplicate_command_event_is_deduped_by_event_id():
+    # A re-delivered control event (a fresh re-sync after sync_reset/reconnect
+    # replays recent timeline) must run the command ONCE — else device.pair_start
+    # mints a fresh pairing code per replay (the "too many active codes" storm).
+    cap: list = []
+    clear = {
+        "type": "m.room.message",
+        "content": {"msgtype": "chat4000.command", "command": "device.pair_start"},
+    }
+    s = _session(clear, cap)
+    enc = {"type": "m.room.encrypted", "sender": "@u:hs", "event_id": "$cmd1"}
+    await s._handle_encrypted("!control:hs", enc)
+    await s._handle_encrypted("!control:hs", enc)  # same event_id, replayed
+    assert cap == [("cmd", "!control:hs", "device.pair_start", clear["content"], "@u:hs")]
+
+
+async def test_distinct_command_event_ids_each_dispatch():
+    # Different event_ids (e.g. a genuine "Try Again") each run — dedup is by id.
+    cap: list = []
+    clear = {
+        "type": "m.room.message",
+        "content": {"msgtype": "chat4000.command", "command": "device.pair_start"},
+    }
+    s = _session(clear, cap)
+    await s._handle_encrypted("!control:hs", {"type": "m.room.encrypted", "sender": "@u:hs", "event_id": "$a"})
+    await s._handle_encrypted("!control:hs", {"type": "m.room.encrypted", "sender": "@u:hs", "event_id": "$b"})
+    assert len(cap) == 2
+
+
 async def test_command_outside_control_room_is_ignored():
     cap: list = []
     clear = {
