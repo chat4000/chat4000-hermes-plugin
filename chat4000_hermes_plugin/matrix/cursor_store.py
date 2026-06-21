@@ -83,6 +83,37 @@ class CursorStore:
             to_device_pos=td if isinstance(td, str) else None,
         )
 
+    def clear_cursors(self, names: list[str]) -> None:
+        """Discard exactly the named durable cursor(s), leaving every other cursor
+        intact (protocol D.1 `sync_reset` / D.2 "Device rule"). On a `pos_expired`
+        reset the gateway sends `cursors: ["pos"]`, so this clears the room `pos`
+        only and KEEPS `to_device_pos` — the to-device stream is a separate, durable
+        token the homeserver never invalidates, and dropping it would lose Megolm
+        keys.
+
+        We re-read the current file, drop only the named keys, and atomically rewrite
+        the remainder — so a later reconnect cannot replay the discarded cursor while
+        the surviving one(s) stay valid. Unknown names are ignored (a cursor we never
+        persisted is already "absent"). Best-effort, like `persist()`: a failed clear
+        is logged, never raised — the in-memory reset (gateway_client) is what keeps
+        the live socket correct; the file only matters across a process restart, and
+        the worst case there is one extra homeserver `M_UNKNOWN_POS` round-trip."""
+        current = self.load()
+        keep: dict[str, str] = {}
+        if "pos" not in names and current.pos is not None:
+            keep["pos"] = current.pos
+        if "to_device_pos" not in names and current.to_device_pos is not None:
+            keep["to_device_pos"] = current.to_device_pos
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+            tmp.write_text(json.dumps(keep), encoding="utf-8")
+            with contextlib.suppress(OSError):
+                os.chmod(tmp, 0o600)
+            os.replace(tmp, self._path)
+        except OSError as exc:
+            logger.warning("sync cursor clear failed (%s): %s", self._path, exc)
+
     def persist(self, pos: str | None, to_device_pos: str | None) -> None:
         """Atomically write both cursors as one object (temp file + rename) so the
         two always land together and a crash can't corrupt the file. Best-effort:

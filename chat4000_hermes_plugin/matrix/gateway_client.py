@@ -4,7 +4,7 @@ Speaks the gateway's muxed frame envelope (verified against the real
 `chat4000-matrix-ws-proxy/src/protocol.rs`):
 
   client → gateway:  auth, sync_start, sync_update, sync_ack, sync_stop, req
-  gateway → client:  auth_ok, auth_error, reauth, resp, error, sync
+  gateway → client:  auth_ok, auth_error, reauth, resp, error, sync, sync_reset
 
 Responsibilities:
   - `auth` handshake (+ re-auth on `reauth` without dropping the socket)
@@ -133,8 +133,11 @@ class GatewayClient:
         `wait_authed()` to block until the first successful auth."""
         self._run_task = asyncio.ensure_future(self._run_forever())
 
-    async def wait_authed(self) -> None:
-        await self._authed.wait()
+    async def wait_authed(self, timeout: float | None = None) -> None:
+        await asyncio.wait_for(
+            self._authed.wait(),
+            timeout=self._request_timeout if timeout is None else timeout,
+        )
 
     async def close(self) -> None:
         self._abort.set()
@@ -155,7 +158,7 @@ class GatewayClient:
     ) -> tuple[int, dict[str, Any]]:
         """Forward a C-S API call. Returns `(status, body)`. This is THE way
         every homeserver call leaves the plugin."""
-        await self._authed.wait()
+        await self.wait_authed()
         rid = uuid.uuid4().hex[:32]
         fut: asyncio.Future[tuple[int, dict[str, Any]]] = asyncio.get_running_loop().create_future()
         self._pending[rid] = fut
@@ -303,6 +306,10 @@ class GatewayClient:
             logger.warning("gateway error frame: %s", frame.get("reason"))
             return
 
+        if t == "sync_reset":
+            self._handle_sync_reset(frame)
+            return
+
         if t == "sync":
             # Hand off to the worker — do NOT await on_sync here. on_sync makes its
             # own requests (key upload/query, createRoom, …) and awaits their `resp`
@@ -311,6 +318,47 @@ class GatewayClient:
             # connect timeout). Enqueue and keep reading.
             self._sync_queue.put_nowait(frame)
             return
+
+    def _handle_sync_reset(self, frame: dict[str, Any]) -> None:
+        """Handle a gateway→device `sync_reset` frame (protocol D.1 / D.2 cursor-expiry
+        recovery). The homeserver expired the room cursor with `M_UNKNOWN_POS`; the
+        gateway has ALREADY dropped the named cursor(s) and re-initialised the upstream
+        sync from scratch on THIS SAME socket. Our job (D.2 "Device rule"):
+
+          - immediately discard exactly the named durable cursor(s) so a later reconnect
+            cannot replay them (for `pos_expired` the gateway names `["pos"]` only);
+          - KEEP any cursor not named — a `pos_expired` reset leaves `to_device_pos`
+            intact (it is a separate durable stream token, never invalidated; dropping
+            it would lose Megolm keys);
+          - do NOT tear down crypto state, and do NOT send a new `sync_start` — the fresh
+            `sync` frames are already streaming on this socket and the sync worker keeps
+            consuming them, persisting the new `pos` through the normal ack flow.
+
+        Defensive parse: a missing/garbled `cursors` list is treated as empty (we clear
+        nothing rather than guess), and an unexpected `cursors` shape is logged — a
+        malformed reset must not crash the read loop."""
+        reason = frame.get("reason")
+        raw = frame.get("cursors")
+        if isinstance(raw, list):
+            names = [c for c in raw if isinstance(c, str)]
+        else:
+            names = []
+            if raw is not None:
+                logger.warning("sync_reset with non-list cursors (reason=%s): %r", reason, raw)
+        logger.info("gateway sync_reset reason=%s cursors=%s", reason, names)
+        if not names:
+            return
+        # Clear the named cursor(s) IN MEMORY so neither this socket's next ack-resume
+        # nor a reconnect's sync_start replays the expired value; KEEP the rest.
+        if "pos" in names:
+            self._last_persisted_pos = None
+        if "to_device_pos" in names:
+            self._last_persisted_to_device_pos = None
+        # Discard the same named cursor(s) from durable storage (atomically, keeping the
+        # survivors) so a PROCESS restart can't replay them either.
+        cursor_store = getattr(self, "_cursor_store", None)
+        if cursor_store is not None:
+            cursor_store.clear_cursors(names)
 
     async def _sync_worker_loop(self) -> None:
         """Process sync frames serially, OFF the read loop, so the read loop stays
