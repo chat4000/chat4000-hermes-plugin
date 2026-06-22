@@ -194,16 +194,23 @@ class GatewayClient:
         `pos` AND its to-device room keys + crypto state, with the to-device cursor
         at `to_device_pos`), so it may advance BOTH upstream cursors. CALL ONLY AFTER
         the crypto store is written (anti-UTD): never ack a to_device_pos whose keys
-        aren't durable. Records both for reconnect resume; carries the last
-        to_device_pos forward on frames that had no to-device section."""
+        aren't durable. Records both for reconnect resume.
+
+        ECHO-EXACT (protocol D.1): the `sync_ack`'s `to_device_pos` MUST echo
+        EXACTLY the acked `sync` frame's `to_device_pos` — present iff that frame
+        carried a to-device section, omitted otherwise — and NEVER a carried-forward
+        earlier value. The gateway validates the echo against the pending frame it
+        sent and closes the socket with `bad_sync_ack` on any mismatch. Carry-forward
+        of the durable to-device cursor applies ONLY to `sync_start` resume (see
+        `start_sync`), never here.
+        """
         self._last_persisted_pos = pos
         frame: dict[str, Any] = {"t": "sync_ack", "pos": pos}
         if to_device_pos is not None:
             self._last_persisted_to_device_pos = to_device_pos
-        # Send the latest to-device cursor on durable storage (carry-forward); omit
-        # only if we've never received one (absent → gateway leaves it unchanged).
-        if self._last_persisted_to_device_pos is not None:
-            frame["to_device_pos"] = self._last_persisted_to_device_pos
+            # Echo EXACTLY this frame's to_device_pos. Omit when this frame had no
+            # to-device section (to_device_pos is None) — do NOT carry forward.
+            frame["to_device_pos"] = to_device_pos
         # Durably persist BOTH cursors (atomically, together) so a PROCESS restart —
         # not just a same-process reconnect — resumes incrementally (protocol D).
         # This runs on the ack path, i.e. AFTER the crypto driver flushed this

@@ -29,15 +29,22 @@ def _gw(pos=None, td=None):
     return gw, sent
 
 
-async def test_ack_sync_sends_both_and_carries_forward():
+async def test_ack_sync_echoes_acked_frame_to_device_pos_exactly():
+    """ECHO-EXACT (protocol D.1): a sync_ack's to_device_pos echoes EXACTLY the
+    acked frame's to_device_pos — present iff that frame carried a to-device
+    section, omitted otherwise — and NEVER a carried-forward earlier value."""
     gw, sent = _gw()
     # A frame WITH a to-device cursor: ack both.
     await gw.ack_sync("p1", "td1")
     assert sent[-1] == {"t": "sync_ack", "pos": "p1", "to_device_pos": "td1"}
-    # A frame with NO to-device section: carry td1 forward (omitting it would tell
-    # the gateway to leave the cursor unchanged — but the spec says carry it).
+    # A frame with NO to-device section: OMIT to_device_pos. Do NOT carry td1
+    # forward into the ack — the gateway validates the echo against the pending
+    # frame and closes with bad_sync_ack on a mismatch. (Carry-forward of the
+    # durable cursor lives only in sync_start resume, asserted below.)
     await gw.ack_sync("p2")
-    assert sent[-1] == {"t": "sync_ack", "pos": "p2", "to_device_pos": "td1"}
+    assert sent[-1] == {"t": "sync_ack", "pos": "p2"}
+    # But the durable cursor IS still carried forward for reconnect resume.
+    assert gw._last_persisted_to_device_pos == "td1"
 
 
 async def test_ack_sync_omits_to_device_pos_until_first_seen():
@@ -89,8 +96,10 @@ async def test_cursors_survive_a_process_restart(tmp_path, monkeypatch):
     restart (a brand-new GatewayClient, simulating a new process) resumes an
     INCREMENTAL sync — a fresh, cursor-less sync would drop the device_lists delta.
 
-    The in-memory-only carry-forward already covered same-process reconnects; this
-    asserts the durable-storage path across a real construction boundary.
+    The in-memory carry-forward of the DURABLE cursor (for sync_start resume)
+    already covered same-process reconnects; this asserts the durable-storage path
+    across a real construction boundary. NB: per ECHO-EXACT (D.1) the carry-forward
+    no longer appears in the ack FRAME — only in the persisted cursor + sync_start.
     """
     monkeypatch.setenv("HERMES_STATE_DIR", str(tmp_path))
 
@@ -103,8 +112,10 @@ async def test_cursors_survive_a_process_restart(tmp_path, monkeypatch):
 
     gw1._send = _cap1  # type: ignore[method-assign,assignment]
     await gw1.ack_sync("r1", "t1")
-    await gw1.ack_sync("r2")  # no to-device section → t1 carries forward
-    assert sent1[-1] == {"t": "sync_ack", "pos": "r2", "to_device_pos": "t1"}
+    await gw1.ack_sync("r2")  # no to-device section → ack OMITS to_device_pos (echo-exact)
+    assert sent1[-1] == {"t": "sync_ack", "pos": "r2"}
+    # The durable to-device cursor is still carried forward in memory + persisted.
+    assert gw1._last_persisted_to_device_pos == "t1"
 
     # ── Process 2: a FRESH GatewayClient (new instance == new process). Its
     #    __init__ loads the persisted cursors; its first sync_start replays both. ──

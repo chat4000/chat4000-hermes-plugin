@@ -103,8 +103,10 @@ class CryptoDriver:
         self._log_room_key_arrivals(decrypted_to_device)
 
         # 2. Store is durable → safe to advance BOTH upstream cursors. We ack the
-        #    to-device cursor only AFTER its keys are persisted (anti-UTD); ack_sync
-        #    carries the last to_device_pos forward on frames with no to-device.
+        #    to-device cursor only AFTER its keys are persisted (anti-UTD). ECHO-EXACT
+        #    (protocol D.1): we pass this frame's `to_device_pos` straight through —
+        #    None when the frame had no to-device section — so the ack echoes exactly
+        #    what the gateway sent and never a carried-forward value.
         if parsed.pos:
             await self._gw.ack_sync(parsed.pos, parsed.to_device_pos)
 
