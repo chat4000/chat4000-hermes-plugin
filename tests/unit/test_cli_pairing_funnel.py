@@ -250,6 +250,30 @@ async def test_pair_passes_ttl_and_reusable_through(monkeypatch, fake_room_sessi
     assert kwargs["reusable"] is True
 
 
+async def test_pair_uses_caller_supplied_code_verbatim(monkeypatch, fake_room_session):
+    """A `--code` value (validated 6-digit at the CLI boundary) is minted as-is
+    instead of a random one — the registrar still owns format + collision."""
+    monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")
+    reg = _OkReg()
+    monkeypatch.setattr(cli, "_registrar", lambda: reg)
+    _capture(monkeypatch)
+    await cli._run_pair("default", code="424242")
+    code, _ = reg.register_calls[0]
+    assert code == "424242"
+
+
+def test_pair_cli_rejects_non_six_digit_code(monkeypatch):
+    """The CLI boundary validates `--code` is exactly 6 digits before any
+    network call (fast, local error)."""
+    from click.testing import CliRunner
+
+    cli_group = cli._build_chat4000_cli()
+    for bad in ("12345", "1234567", "12a456", "abcdef"):
+        result = CliRunner().invoke(cli_group, ["pair", "--code", bad])
+        assert result.exit_code != 0
+        assert "must be exactly 6 digits" in result.output
+
+
 async def test_reusable_completion_carries_reusable_prop(monkeypatch, fake_room_session):
     """PL4: a reusable code's redeem reports reusable=True on the event."""
     monkeypatch.setenv("CHAT4000_SERVICE_TOKEN", "tok")

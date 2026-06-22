@@ -121,15 +121,32 @@ def _build_chat4000_cli() -> Any:  # noqa: ANN401  # returns a click.Group (unty
         help="The code can be redeemed many times until expiry, each redeem "
         "adding another device (fleet enrollment; single-use is the default).",
     )
-    def cmd_pair(account: str, stage: bool, ttl_seconds: int | None, reusable: bool) -> None:
+    @click.option(
+        "--code",
+        "custom_code",
+        default=None,
+        help="Use this exact code instead of a random one (must be exactly 6 "
+        "digits). Rejected with 'code in use' if it is already active.",
+    )
+    def cmd_pair(
+        account: str,
+        stage: bool,
+        ttl_seconds: int | None,
+        reusable: bool,
+        custom_code: str | None,
+    ) -> None:
         """Set up (first run) and pair a device with a 6-digit code."""
+        if custom_code is not None and not (custom_code.isdigit() and len(custom_code) == 6):
+            raise click.BadParameter("code must be exactly 6 digits", param_hint="--code")
         if stage:
             os.environ["CHAT4000_ENV"] = "stage"
         # Persist whatever environment we're pairing against so future
         # invocations (status, a fresh shell, the gateway) stay on it.
         _persist_env(_resolve_env())
         try:
-            asyncio.run(_run_pair(account, ttl_seconds=ttl_seconds, reusable=reusable))
+            asyncio.run(
+                _run_pair(account, ttl_seconds=ttl_seconds, reusable=reusable, code=custom_code)
+            )
         except KeyboardInterrupt:
             click.echo("\nPairing cancelled.")
         except Exception as exc:  # noqa: BLE001
@@ -283,7 +300,11 @@ def main() -> None:
 
 
 async def _run_pair(
-    account: str, *, ttl_seconds: int | None = None, reusable: bool = False
+    account: str,
+    *,
+    ttl_seconds: int | None = None,
+    reusable: bool = False,
+    code: str | None = None,
 ) -> None:
     import click
 
@@ -328,7 +349,10 @@ async def _run_pair(
     # Mint a pairing code — bound implicitly to the plugin's one DERIVED user
     # (C.3.1); the bot token alone selects it (no kind, no plugin_id, no
     # user_id). `ensure_setup` bound the bot token onto `reg`.
-    code = _gen_code()
+    # A caller-supplied `--code` (already validated as 6 digits) is used verbatim;
+    # otherwise mint a random one. The registrar still enforces format + rejects
+    # a collision with 'code in use' (M_CODE_IN_USE).
+    code = code or _gen_code()
     register_resp = await reg.create_code(
         code,
         ttl_seconds=ttl_seconds,
