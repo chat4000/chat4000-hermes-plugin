@@ -22,6 +22,7 @@ the built pyvodozemac wheel).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import uuid
@@ -131,6 +132,19 @@ class Chat4000MatrixAdapter:
         except RuntimeError:
             self._loop = None
 
+        # Idempotent connect (connection-leak ROOT FIX): the Hermes host may call
+        # connect() again on an already-live adapter (its reconnect/health path).
+        # Each connect() builds a FRESH MatrixSession → GatewayClient → run-loop →
+        # WebSocket; without first stopping any prior session, the old run-loop's
+        # asyncio task keeps it alive and its socket NEVER closes — so sockets
+        # STACK on the one device (6 observed live on personal-hermes). The stacked
+        # connections then poll sliding-sync concurrently on the same conn_id,
+        # racing the `pos` → tuwunel returns M_UNKNOWN_POS → the gateway emits
+        # sync_reset bursts → timeline replay → duplicate command execution (the
+        # mint storm / 30 rooms). Tearing the prior session down here guarantees at
+        # most one live gateway loop, killing the leak at its source.
+        await self._teardown_live()
+
         creds = load_bot_creds(self._account_id)
         if creds is None:
             # Gateway-first: self-onboard the bot identity at startup so we can
@@ -195,6 +209,7 @@ class Chat4000MatrixAdapter:
 
             logger.error("chat4000 v2 connect failed: %s", exc)
             dump_chat4000_trace("matrix.connect", exc)
+            await self._cleanup_failed_connect()
             return False
 
         self._connected = True
@@ -210,6 +225,27 @@ class Chat4000MatrixAdapter:
         pair_listener.start()
         self._start_version_poller()
         return True
+
+    async def _cleanup_failed_connect(self) -> None:
+        """Tear down resources that may have started before connect() failed."""
+        self._connected = False
+        self._commands = None
+        self._media = None
+        self._pair_listener = None
+        self._version_poller = None
+        self._invited.clear()
+        self._clear_ready()
+        session = self._session
+        self._session = None
+        if session is None:
+            return
+        try:
+            await session.stop()
+        except Exception as exc:  # noqa: BLE001
+            from ..error_log import dump_chat4000_trace
+
+            logger.warning("chat4000 v2 connect cleanup failed: %s", exc)
+            dump_chat4000_trace("matrix.connect_cleanup", exc)
 
     def _start_version_poller(self) -> None:
         """Spawn the resident plugin-version poller (C.5.2). It polls the registrar
@@ -380,10 +416,24 @@ class Chat4000MatrixAdapter:
             control, "m.room.message", content, self._session.recipients(control), push=False
         )
 
-    async def disconnect(self) -> None:
+    async def _teardown_live(self) -> None:
+        """Stop every live resource this adapter started — the gateway session
+        (run-loop + WebSocket), the invite watcher, the pairing-completion listener
+        and the version poller — and reset the live flags. Idempotent and
+        None-safe, so it no-ops on a fresh adapter.
+
+        Shared by disconnect() AND a re-entrant connect() (called at the TOP of
+        connect()): a second connect() MUST fully stop the prior session before
+        building a new one, or the old gateway run-loop's asyncio task keeps its
+        WebSocket open forever and sockets stack on one device — the connection
+        leak that drives the M_UNKNOWN_POS / sync_reset churn. Deliberately does
+        NOT deregister the adapter or flush analytics: those belong to a real
+        shutdown (disconnect()), not to a reconnect."""
         self._connected = False
         if self._invite_task is not None:
             self._invite_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._invite_task
             self._invite_task = None
         if self._pair_listener is not None:
             await self._pair_listener.stop()
@@ -392,12 +442,15 @@ class Chat4000MatrixAdapter:
             await self._version_poller.stop()
             self._version_poller = None
         self._clear_ready()
-        from ..plugin_hooks import deregister_active_adapter
-
-        deregister_active_adapter(self)
         if self._session is not None:
             await self._session.stop()
             self._session = None
+
+    async def disconnect(self) -> None:
+        await self._teardown_live()
+        from ..plugin_hooks import deregister_active_adapter
+
+        deregister_active_adapter(self)
         from .. import analytics
 
         # DEC3: no gateway_stopped event — just flush so any pending
