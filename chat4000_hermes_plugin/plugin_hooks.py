@@ -64,6 +64,20 @@ def _adapter_for_session(session_id: str) -> Chat4000MatrixAdapter | None:
     return None
 
 
+def _remember_runtime_session_room(
+    adapter: Chat4000MatrixAdapter, session_id: str, room: str
+) -> None:
+    """Record the runtime hook session id while the task-local room is present."""
+    if not session_id or not room:
+        return
+    by_session = getattr(adapter, "_room_by_session", None)
+    by_room = getattr(adapter, "_session_by_room", None)
+    if isinstance(by_session, dict):
+        by_session[session_id] = room
+    if isinstance(by_room, dict):
+        by_room[room] = session_id
+
+
 def connected_adapter_for_room(room: str, session_id: str = "") -> Chat4000MatrixAdapter | None:
     """Return the connected adapter that owns this Chat4000 turn room."""
     candidates = [
@@ -146,6 +160,9 @@ def on_session_start(*, session_id: str = "", platform: str = "", **_: object) -
 def on_pre_llm_call(*, session_id: str = "", platform: str = "", **_: object) -> None:
     if session_id and (platform or "").strip().lower() == "chat4000":
         _SESSION_PLATFORM.setdefault(session_id, "chat4000")
+        adapter = _adapter_for_session(session_id)
+        if adapter is not None:
+            _remember_runtime_session_room(adapter, session_id, _current_chat_id())
 
 
 def on_session_end(*, session_id: str = "", **_: object) -> None:

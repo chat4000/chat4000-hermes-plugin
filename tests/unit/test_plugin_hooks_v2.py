@@ -19,6 +19,8 @@ class FakeAdapter:
         self._connected = True
         self._loop = loop
         self._active_room = "!r"
+        self._room_by_session = {}
+        self._session_by_room = {}
         self.started: list = []
 
     async def external_tool_start(self, name, args=None, icon="", session_id="", room=""):
@@ -27,7 +29,7 @@ class FakeAdapter:
         return tid
 
     def _room_for_session(self, session_id):
-        return self._active_room
+        return self._room_by_session.get(session_id) or self._active_room
 
 
 async def _drain():
@@ -80,6 +82,41 @@ async def test_non_chat4000_session_is_ignored():
         h.on_pre_tool_call(tool_name="bash", args={}, task_id="t9", session_id="s9")
         await _drain()
         assert a.started == []
+    finally:
+        h.deregister_active_adapter(a)
+        _clear()
+
+
+async def test_pre_llm_call_records_runtime_session_room_for_tool_fallback(monkeypatch):
+    """Regression: some tools can fire pre_tool_call after the task-local chat
+    room is gone. Capture the runtime session id while pre_llm_call still has it
+    so the later tool chip can route without falling back to a global room."""
+    a = FakeAdapter(asyncio.get_running_loop())
+    a._active_room = None
+    h.register_active_adapter(a)
+    _clear()
+    monkeypatch.setattr(h, "_current_chat_id", lambda: "!ctxroom")
+    try:
+        h.on_pre_llm_call(session_id="20260612_065320_0a14a1aa", platform="chat4000")
+        assert a._room_by_session == {"20260612_065320_0a14a1aa": "!ctxroom"}
+
+        monkeypatch.setattr(h, "_current_chat_id", lambda: "")
+        h.on_pre_tool_call(
+            tool_name="web_search",
+            args={"query": "x"},
+            session_id="20260612_065320_0a14a1aa",
+        )
+        await _drain()
+        assert a.started == [
+            (
+                "web_search",
+                {"query": "x"},
+                "",
+                "tid-web_search",
+                "20260612_065320_0a14a1aa",
+                "",
+            )
+        ]
     finally:
         h.deregister_active_adapter(a)
         _clear()
