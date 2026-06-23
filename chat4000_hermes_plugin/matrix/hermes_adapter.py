@@ -452,10 +452,14 @@ class Chat4000MatrixAdapter:
 
         deregister_active_adapter(self)
         from .. import analytics
+        from ..telemetry import flush_chat4000_telemetry
 
         # DEC3: no gateway_stopped event — just flush so any pending
         # pairing_completed from the resident listener lands before exit.
         analytics.flush()
+        # Drain Sentry too: a crash captured during teardown must ship before the
+        # gateway process dies rather than wait on the background transport.
+        flush_chat4000_telemetry()
 
     # ─── inbound callbacks (from MatrixSession) ───────────────────────────
 

@@ -25,6 +25,7 @@ Config (env): CHAT4000_REGISTRAR_URL (default prod), CHAT4000_SERVICE_TOKEN
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import os
 import secrets
@@ -38,6 +39,7 @@ from .matrix.registrar_client import RegistrarClient, RegistrarError
 from .matrix.users_store import add_known_user, load_known_users
 from .package_info import read_package_version
 from .telemetry import (
+    flush_chat4000_telemetry,
     get_telemetry_status,
     initialize_chat4000_telemetry,
     set_telemetry_enabled,
@@ -286,9 +288,28 @@ def main() -> None:
     from . import analytics
 
     analytics.initialize_chat4000_analytics()
-    # CLI commands are short-lived — flush on ANY exit path (incl. sys.exit) so
-    # every tracked event actually lands before the process dies.
-    atexit.register(analytics.flush)
+
+    def _flush_telemetry() -> None:
+        # CLI commands are short-lived — drain BOTH PostHog and Sentry on ANY exit
+        # path (incl. sys.exit) so every analytics event and crash report lands
+        # before the process dies. Both flushes are best-effort no-ops when their
+        # system never initialized.
+        analytics.flush()
+        flush_chat4000_telemetry()
+
+    atexit.register(_flush_telemetry)
+
+    # SIGINT/SIGTERM (Ctrl-C, container stop) bypass atexit unless we translate
+    # them into a normal exit — do that AFTER flushing, so a terminated CLI run
+    # (e.g. `pair` waiting on a device) still ships its queued events.
+    def _on_signal(_signum: int, _frame: object) -> None:
+        _flush_telemetry()
+        sys.exit(0)
+
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(_sig, _on_signal)
+
     cli = _build_chat4000_cli()
     try:
         cli(prog_name="chat4000")

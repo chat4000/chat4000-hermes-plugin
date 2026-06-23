@@ -120,6 +120,11 @@ def initialize_chat4000_telemetry() -> None:
             # treats the event as a plain JSON dict (structurally compatible).
             before_send=_scrub_event,  # type: ignore[arg-type]
             default_integrations=False,
+            # The plugin is mostly short-lived; give the atexit transport drain a
+            # bounded window so a crash report captured right before exit actually
+            # ships instead of dying with the background worker. flush_chat4000_
+            # telemetry() below is the explicit backstop on every exit path.
+            shutdown_timeout=5.0,
         )
         sentry_sdk.set_user({"id": status["install_id"]})
         sentry_sdk.set_tag("python_version", f"{sys.version_info.major}.{sys.version_info.minor}")
@@ -146,6 +151,24 @@ def capture_chat4000_exception(error: BaseException, *, scope: str | None = None
                 s.set_tag("chat4000_scope", _scrub_secrets(scope))
             sentry_sdk.capture_exception(error)
     except Exception:  # noqa: BLE001, S110  # part of the sink path — must NOT re-enter dump_chat4000_trace (recursion)
+        pass
+
+
+def flush_chat4000_telemetry(timeout: float = 5.0) -> None:
+    """Block until queued Sentry events are sent (or `timeout` elapses).
+
+    Call on every process-exit path. The SDK ships events on a background
+    transport, so a short-lived plugin run (CLI command, one-shot task) can exit
+    before a just-captured crash report is sent — this drains it first. No-op
+    when Sentry never initialized. Best-effort: a flush failure must never
+    re-enter the sink (recursion) or break the exit path."""
+    if not _sentry_initialized:
+        return
+    try:
+        import sentry_sdk
+
+        sentry_sdk.flush(timeout=timeout)
+    except Exception:  # noqa: BLE001, S110  # exit-path drain — must NOT re-enter dump_chat4000_trace (recursion)
         pass
 
 

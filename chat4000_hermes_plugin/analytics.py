@@ -95,6 +95,15 @@ def initialize_chat4000_analytics() -> None:
             # Network-level safety: don't let analytics block plugin startup.
             timeout=3,
             disable_geoip=True,
+            # Flush IMMEDIATELY — the plugin is mostly short-lived (CLI commands,
+            # one-shot tasks) and we lost prod events to the default batching
+            # (flush_at=100, flush_interval=0.5s) when the process exited before a
+            # batch ever drained. flush_at=1 sends each captured event on its own
+            # background drain; flush_interval=0 removes the timer wait so there's
+            # no window where a queued event sits unsent. Explicit flush()/
+            # shutdown() on exit paths remain the backstop.
+            flush_at=1,
+            flush_interval=0.0,
         )
         _initialized = True
         logger.debug(
