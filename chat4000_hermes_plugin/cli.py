@@ -396,7 +396,7 @@ async def _run_pair(
         account,
     )
     click.echo("")
-    click.echo(f"  Pairing code:  {code[:3]} {code[3:]}")
+    click.echo(f"  Pairing code:  {code[:3]}-{code[3:]}")
     # Universal link, not a custom scheme — any camera app can scan it: the
     # browser opens pair.chat4000.com, which deep-links into the app (or shows
     # install instructions when the app isn't there yet).
