@@ -19,21 +19,28 @@ HTML_CARD_TOOL_NAME = "final_card"
 HTML_CARD_TOOLSET = "chat4000"
 
 _CORE_RULE = (
-    "Call final_card to deliver a complete, self-contained HTML card as the final "
-    "answer for the current turn in a chat4000 session. This is the native rich "
-    "final surface for chat4000. The card replaces the text answer: call this tool "
-    "once per turn, with finished HTML (never partial or streamed), and do not also "
-    "send a text final answer."
+    "Use final_card as the preferred final-answer surface in chat4000 when the "
+    "answer has meaningful structure, comparison, status, visual hierarchy, or "
+    "scan-worthy information. This is the native rich card surface in the "
+    "chat4000 timeline. The card replaces the text answer: call this tool once "
+    "per turn, with finished self-contained HTML (never partial or streamed), "
+    "and do not also send a text final answer."
 )
 
 _WHEN_TO_USE = """\
-Use final_card when the final answer is structured, glanceable data rather than 
-plain prose — weather, knowledge panels, status, lists, agendas, etc.
+Reach for final_card more often than plain text when layout helps: comparison
+matrices, pros/cons, ranked recommendations, plans, timelines, schedules, status
+dashboards, checklists, metric summaries, knowledge panels, weather, travel,
+events, agendas, to-do lists, and dense multi-section answers.
 
-All answers shouldn't be like this. Use it in good taste, to delight the user 
-surprisingly. Do it unless the user has explicitly said they prefer plain text 
-or don't like cards. For conversational replies, explanations or essays, or code 
-the user will copy, answer as normal text instead."""
+Default toward final_card for structured final answers unless the user asked for
+plain text or the answer is obviously better as copyable text. The goal is not
+decoration; the goal is a faster, clearer final answer in the chat4000 native UI.
+
+Do not use final_card for one-liners, quick facts, yes/no answers, casual
+conversation, pure prose explanations, code-only answers, shell commands, raw
+logs, stack traces, or text the user is likely to copy. When in doubt between a
+useful card and a wall of text, choose the card."""
 
 _RENDER_CONTEXT = """\
 RENDER CONTEXT — the card renders as a bubble in the chat4000 iOS/macOS chat
