@@ -30,6 +30,14 @@ class _FakeSession:
         self.rooms = rooms
 
 
+class _StoppableSession:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
 def _adapter(rooms: _FakeRooms, account_id: str = "default") -> Chat4000MatrixAdapter:
     a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
     a._session = _FakeSession(rooms)  # type: ignore[assignment]
@@ -63,3 +71,27 @@ async def test_repeated_calls_are_idempotent(tmp_path, monkeypatch) -> None:  # 
     await a._ensure_initial_session("@u:hs")  # e.g. connect()
     await a._ensure_initial_session("@u:hs")  # e.g. a later invite-watch poll
     assert len(rooms.created) == 1  # never a second room
+
+
+async def test_failed_connect_cleanup_stops_partial_session() -> None:
+    session = _StoppableSession()
+    a = Chat4000MatrixAdapter.__new__(Chat4000MatrixAdapter)
+    a._connected = True
+    a._commands = object()
+    a._media = object()
+    a._pair_listener = object()
+    a._version_poller = object()
+    a._invited = {"@u:hs"}
+    a._session = session
+    a._clear_ready = lambda: None  # type: ignore[method-assign]
+
+    await a._cleanup_failed_connect()
+
+    assert session.stopped is True
+    assert a._session is None
+    assert a._connected is False
+    assert a._commands is None
+    assert a._media is None
+    assert a._pair_listener is None
+    assert a._version_poller is None
+    assert a._invited == set()
