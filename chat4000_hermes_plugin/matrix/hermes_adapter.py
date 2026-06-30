@@ -126,7 +126,15 @@ class Chat4000MatrixAdapter:
 
     # ─── lifecycle ────────────────────────────────────────────────────────
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        # `is_reconnect` is part of the BasePlatformAdapter.connect contract as of
+        # Hermes 0.17.0 (base.py: `async def connect(self, *, is_reconnect: bool =
+        # False)`; the host calls `adapter.connect(is_reconnect=...)`). Pre-0.17
+        # hosts (0.13–0.16) call `connect()` with no args, so the default keeps
+        # this backward-compatible across all of them. We accept the flag but do
+        # not need its value: the idempotent `_teardown_live()` below already makes
+        # connect() safe to call whether it's a first connect or a reconnect.
+        del is_reconnect
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
