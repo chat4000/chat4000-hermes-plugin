@@ -418,7 +418,10 @@ async def _run_pair(
             )
             return
         click.echo("Pairing code expired without a device redeeming it. Try again.")
-        return
+        # IN10: a real expiry must signal FAILURE via a non-zero exit. The
+        # installer reads ONLY our exit code to judge pairing; a 0 here made it
+        # report a false "device paired" success on an expired code.
+        raise SystemExit(1)
 
     add_known_user(user_id, account)
     # PL4/FLW3-4: pairing_completed once per redeemed device, deduped against
