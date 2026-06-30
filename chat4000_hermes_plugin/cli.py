@@ -320,6 +320,30 @@ def main() -> None:
 # ─── pair flow ──────────────────────────────────────────────────────────────
 
 
+# IN11: granular pair-outcome contract shared with the installer + the OpenClaw
+# plugin + the analytics registry. `pair` writes the outcome (one canonical enum
+# line) to $CHAT4000_PAIR_OUTCOME_FILE (mechanism A) AND exits with a distinct
+# code per failure (mechanism B); the installer reads the file, falling back to
+# the exit code. Enum values: paired | paired_reusable | pending_reusable |
+# pending_window_elapsed | expired | registrar_error | code_emit_timeout |
+# launch_failed | cancelled | unknown.
+_PAIR_OUTCOME_ENV = "CHAT4000_PAIR_OUTCOME_FILE"
+_PAIR_EXIT_EXPIRED = 11
+_PAIR_EXIT_REGISTRAR_ERROR = 12
+
+
+def _write_pair_outcome(outcome: str) -> None:
+    """IN11 mechanism A: record the granular pair outcome to the installer-provided
+    file (one enum line). Best-effort; absence/garble -> the installer falls back
+    to our exit code (mechanism B)."""
+    path = os.environ.get(_PAIR_OUTCOME_ENV)
+    if not path:
+        return
+    with contextlib.suppress(OSError):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"{outcome}\n")
+
+
 async def _run_pair(
     account: str,
     *,
@@ -404,7 +428,12 @@ async def _run_pair(
     click.echo("Enter this code in the chat4000 app. Waiting for the device…")
     click.echo("(Ctrl-C to stop.)")
 
-    status = await reg.poll_until_complete(code)
+    try:
+        status = await reg.poll_until_complete(code)
+    except RegistrarError:
+        # IN11: a permanent registrar/HTTP error is its own outcome class.
+        _write_pair_outcome("registrar_error")
+        raise SystemExit(_PAIR_EXIT_REGISTRAR_ERROR)
     user_id = status.get("user_id") if status else None
     if not user_id:
         if reusable:
@@ -416,12 +445,13 @@ async def _run_pair(
                 "No device has redeemed the code yet. It stays active until it "
                 "expires; the running gateway completes pairings as devices join."
             )
+            _write_pair_outcome("pending_reusable")  # IN11: code still live, not a failure
             return
         click.echo("Pairing code expired without a device redeeming it. Try again.")
-        # IN10: a real expiry must signal FAILURE via a non-zero exit. The
-        # installer reads ONLY our exit code to judge pairing; a 0 here made it
-        # report a false "device paired" success on an expired code.
-        raise SystemExit(1)
+        # IN10/IN11: a real expiry must signal FAILURE — a distinct outcome (A)
+        # and a distinct exit code (B); the installer reads either.
+        _write_pair_outcome("expired")
+        raise SystemExit(_PAIR_EXIT_EXPIRED)
 
     add_known_user(user_id, account)
     # PL4/FLW3-4: pairing_completed once per redeemed device, deduped against
@@ -431,6 +461,7 @@ async def _run_pair(
     click.echo("")
     click.echo(f"✓ Paired {user_id}.")
     click.echo("A running gateway invites them + shares keys within a few seconds (no restart).")
+    _write_pair_outcome("paired_reusable" if reusable else "paired")  # IN11
     if reusable:
         click.echo(
             "The code is reusable — it stays active until expiry, and the running "
