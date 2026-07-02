@@ -88,6 +88,15 @@ def initialize_chat4000_analytics() -> None:
         _disabled_reason = "posthog_sdk_missing"
         return
 
+    # The posthog SDK writes its OWN warnings straight to the user's terminal via
+    # `logging.getLogger("posthog")` — most visibly `flush timed out after N
+    # seconds with M items pending` when a best-effort background flush can't
+    # reach the ingestion host before a short-lived CLI (`chat4000 prepare` /
+    # `pair`) exits. That is pure noise to the user and does not indicate anything
+    # they can act on. Silence the SDK's own logger (level only — event delivery
+    # is unaffected) so it never surfaces during install or manual CLI use.
+    logging.getLogger("posthog").setLevel(logging.CRITICAL)
+
     try:
         _client = Posthog(
             project_api_key=api_key,
